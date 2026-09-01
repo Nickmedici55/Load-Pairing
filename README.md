@@ -10,7 +10,7 @@ Sample output, against a generated sheet with estimated mileage. `--carrier`
 already defaults to `PTAG`, so the OTHR load on the sheet is left out:
 
 ```
-$ loadpairing plan dispatch.xlsx --earliest-start 4 --schedule
+$ loadpairing plan dispatch.xlsx --schedule
 
 Dispatch Order_3: 5 loads, 7 stops
 
@@ -19,19 +19,18 @@ Dispatch Order_3: 5 loads, 7 stops
 limits: 14 h duty, 11 h drive; windows enforced; equipment may differ
 note: some lanes use estimated mileage (great-circle x 1.20), not a routing source
 
-Driver  1  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375790 (53PLG, 1 stop, 93 mi, 3.4 h)  ->  05:10-12:02  6.9 h duty, 2.4 h drive
+Driver  1  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  05:10-12:01  6.8 h duty, 0.6 h drive, 1.3 h waiting
             10375778  06:15-07:15  Springfield (Springfield, MA 01109)  window 06:15-11:00
             10375778  07:30-08:30  Westfield (Westfield, MA 01085)  window any
-            10375790  10:37-11:07  Pittsfield DC (Pittsfield, MA 01201)  window 00:00-23:59 D&H
-Driver  2  10375774 (53LG, 1 stop, 9 mi, 2.2 h) + 10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  09:54-14:08  4.2 h duty, 0.2 h drive
+            10375775  11:00-12:00  Chicopee St (Chicopee, MA 01013)  window 11:00-20:00
+Driver  2  10375774 (53LG, 1 stop, 9 mi, 2.2 h) + 10375790 (53PLG, 1 stop, 93 mi, 3.4 h)  ->  09:54-15:27  5.5 h duty, 2.0 h drive
             10375774  11:00-12:00  Holyoke (Holyoke, MA 01040)  window 11:00-20:00
-            10375775  13:07-14:07  Chicopee St (Chicopee, MA 01013)  window 11:00-20:00
-
-Unschedulable:
-  10375781: 11.4 h driving exceeds the 11 h limit on its own
+            10375790  14:01-14:31  Pittsfield DC (Pittsfield, MA 01201)  window 00:00-23:59 D&H
 ```
 
-The Pittsfield stop is the drop and hook: due by 23:59, half an hour on the
+Both drivers leave the DC on the clock of their first stop: 05:10 to be at
+Springfield as it opens at 06:15, 09:54 to be at Holyoke at 11:00. The
+Pittsfield stop is the drop and hook — due by 23:59, half an hour on the
 ground rather than the location's dwell.
 
 ## Running it
@@ -168,28 +167,33 @@ The offline estimate needs ZIP coordinates, which come from `--centroids`
 ## Delivery windows
 
 `Window Close` is the delivery time — the hour the load is due at that stop —
-and `Window Open` is the earliest the receiver will take it. Given a driver's
-trips, the scheduler finds a start time that lands every stop at or before its
-delivery time, or reports which stop it cannot reach in time.
+and `Window Open` is the earliest the receiver will take it.
 
-The search is exact rather than a scan over candidate start times: arrival at
-every stop is non-decreasing in the start time, so meeting every window close
-is downward closed in it, and elapsed duty is non-increasing in it. One
-backward pass finds the latest start that violates nothing — also the start
-that wastes the least time waiting — and the schedule is then pulled back to
-the earliest start that still wastes none, so the driver is not held at the DC
-for no reason. Waiting on a window counts against the 14 h duty limit.
+**The driver leaves the DC at whatever hour lands them at the first stop of a
+turn exactly as it opens.** Not earlier, so nobody sits at a receiver's door;
+not later, so nothing downstream is given away. On the second turn of a pair
+the driver holds at the DC rather than at the customer. That anchor is also
+the earliest the trip can possibly progress — a stop cannot be served before
+it opens — so it is the schedule most likely to make every later delivery
+time.
+
+`--earliest-start` is the one hour before which no driver may roll. When the
+anchor would need a dispatch earlier than that, the day falls back to a search:
+arrival at every stop is non-decreasing in the start time, so meeting every
+delivery time is downward closed in it, and elapsed duty is non-increasing in
+it. One backward pass finds the latest start that violates nothing, and the
+schedule is pulled back to the earliest start that wastes no waiting. Waiting
+counts against the 14 h duty limit either way.
 
 Two things are worth knowing:
 
 * **A `00:00` close means 23:59 that night, not midnight at the start of the
   day.** It also marks the stop as a drop and hook, priced at 0.5 h. So those
   loads are due by end of day and cost half an hour on the ground.
-* **`--earliest-start` matters more than it looks.** It is the hour before
-  which no driver may be dispatched, and it is what makes a hard morning window
-  unpairable behind another turn. It defaults to `0.0`, which lets the
-  scheduler start a driver at any hour; set it to the real dispatch floor
-  (e.g. `--earliest-start 4`) before reading anything into the pair count.
+* **`--earliest-start` defaults to `0`, and should usually stay there.** It is
+  a gate, not a preference: raising it can only push loads out of feasibility,
+  because it forbids the early dispatch a morning delivery time needs. Set it
+  only if there is a real hour before which nobody rolls.
 
 Enforcing windows reduces the pair count. That is expected, not a regression.
 
@@ -221,7 +225,7 @@ different height.
 python -m unittest discover -s tests -t .
 ```
 
-111 tests, no dependencies, under a second. They cover the parser against
+115 tests, no dependencies, under a second. They cover the parser against
 generated workbooks that reproduce the sheet's quirks, the costing arithmetic,
 window feasibility, the lane cache and dwell-override rules, and the planner
 end to end through both the CLI and the WSGI app — including multipart

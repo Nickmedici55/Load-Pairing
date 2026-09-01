@@ -122,9 +122,9 @@ def plan_form(defaults: dict, message: str = "") -> str:
               placeholder="blank for every carrier"></div>
   <div><label for="dc_zip">DC ZIP</label>
        <input id="dc_zip" type="text" name="dc_zip" value="{value('dc_zip', DEFAULT_DC_ZIP)}"></div>
-  <div><label for="earliest_start">Earliest dispatch hour</label>
+  <div><label for="earliest_start">No dispatch before</label>
        <input id="earliest_start" type="number" step="0.25" min="0" max="24" name="earliest_start"
-              value="{value('earliest_start', '4')}"></div>
+              value="{value('earliest_start', '0')}" title="0 lets the delivery times decide"></div>
   <div><label for="max_duty">Duty limit (h)</label>
        <input id="max_duty" type="number" step="0.5" name="max_duty" value="{value('max_duty', '14')}"></div>
   <div><label for="max_drive">Drive limit (h)</label>
@@ -138,7 +138,10 @@ def plan_form(defaults: dict, message: str = "") -> str:
   <label><input type="checkbox" name="match_equipment"{checked('match_equipment')}> Pair only matching trailer types</label>
 </div>
 <button type="submit">Build the plan</button>
-<p class="hint">Header row 6, stop rows carry a blank Carrier ID, tab 3 is the delivery order.
+<p class="hint">The driver leaves the DC at whatever hour lands them at the first stop of a turn
+exactly as it opens, so leave <em>No dispatch before</em> at 0 unless there is a real hour before
+which nobody rolls -- raising it can only make loads unschedulable.
+Header row 6, stop rows carry a blank Carrier ID, tab 3 is the delivery order.
 Window Close is the delivery time; a 00:00 close means due by 23:59 that night and is treated as a
 drop and hook, 30 minutes on the ground. Every other ZIP in the sheet is recorded at a 1.0 h dwell
 the first time it is seen; adjust it under <a href="/locations">Locations</a> and it holds from
@@ -366,7 +369,7 @@ def _settings(form: Form) -> dict:
         "tab": form.get("tab", "3") or "3",
         "carrier": form.get("carrier", DEFAULT_CARRIER_ID),
         "dc_zip": form.get("dc_zip", DEFAULT_DC_ZIP) or DEFAULT_DC_ZIP,
-        "earliest_start": form.get("earliest_start", "4"),
+        "earliest_start": form.get("earliest_start", "0"),
         "max_duty": form.get("max_duty", "14"),
         "max_drive": form.get("max_drive", "11"),
         "objective": form.get("objective", OBJECTIVE_DUTY),

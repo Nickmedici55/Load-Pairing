@@ -4,17 +4,11 @@ from __future__ import annotations
 
 from .models import Assignment
 from .pairing import Plan
-from .windows import END_OF_DAY
+from .windows import END_OF_DAY, format_hour
 
 
-def clock(hours: float) -> str:
-    """``6.25`` -> ``06:15``; anything past midnight is marked ``+1d``."""
-    day, rest = divmod(hours, 24.0)
-    minutes = int(round(rest * 60))
-    if minutes == 1440:
-        day, minutes = day + 1, 0
-    text = f"{minutes // 60:02d}:{minutes % 60:02d}"
-    return f"{text} +{int(day)}d" if day >= 1 else text
+#: Hours are rendered the same way wherever they appear.
+clock = format_hour
 
 
 def delivery_time(stop) -> float:

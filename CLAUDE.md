@@ -112,10 +112,17 @@ The three loads showing 00:00–00:00 are **due by 23:59 that night** and are
 **drop and hooks**, 0.5 h on the ground. They are not "no window" and they are
 not midnight at the start of the day.
 
-The pairing logic now runs a real feasibility check rather than flagging
-suspect pairs: given a sequence of trips it finds a start time that lands every
-stop at or before its delivery time, and rejects the pair when none exists.
-Waiting on a window that has not opened counts against the 14 h duty limit.
+The driver leaves Chicopee at whatever hour lands them at the first stop of a
+turn exactly as `Window Open` says it opens — no earlier, so nobody sits at a
+receiver's door, and no later, so nothing downstream is given away. On the
+second turn of a pair the driver holds at the DC rather than at the customer.
+Only a real "no dispatch before" hour overrides that anchor, and then the day
+starts as late as it can without missing a delivery time.
+
+The pairing logic runs a real feasibility check rather than flagging suspect
+pairs: it rejects a pair when no start time lands every stop at or before its
+delivery time. Waiting on a stop that has not opened counts against the 14 h
+duty limit.
 
 **2. Trailer type.** Equipment types present: `53LG` (liftgate), `53PLG`
 (liftgate pinwheel), `53RL` (roll door), `53PRL` (roll pinwheel), `48PLG`. The
