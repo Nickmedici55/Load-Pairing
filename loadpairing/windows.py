@@ -17,9 +17,13 @@ So the best start is the latest one that violates no window close. A backward
 pass over the stops finds it in one sweep; a forward pass from there produces
 the schedule and the duty total to test against the 14 h limit.
 
-Times are hours past midnight on the day the driver starts. A window whose
-close is before its open is read as running past midnight and its close is
-pushed a day out.
+Times are hours past midnight on the day the driver starts. Window Close is
+the delivery time -- the appointment the load is due by -- and Window Open is
+the earliest the receiver will take it. A close of 00:00 means the end of that
+day rather than the start of it, so it is read as 23:59 (and marks the stop as
+a drop and hook, which :mod:`loadpairing.costing` prices at 30 minutes). Any
+other window whose close falls before its open runs past midnight and has its
+close pushed a day out.
 """
 
 from __future__ import annotations
@@ -29,13 +33,8 @@ from dataclasses import dataclass
 
 from .models import ScheduledStop, Stop
 
-MIDNIGHT_NO_WINDOW = "no-window"
-MIDNIGHT_STRICT = "strict"
-
-#: How to read a 00:00-00:00 window. The spec flags this as unconfirmed: it
-#: most likely means "no window" rather than a stop that must be hit exactly at
-#: midnight, so that is the default.
-DEFAULT_MIDNIGHT_POLICY = MIDNIGHT_NO_WINDOW
+#: What a 00:00 delivery time means: the end of that day, not the start of it.
+END_OF_DAY = 23.0 + 59.0 / 60.0
 
 OPEN_ENDED = (-math.inf, math.inf)
 
@@ -45,17 +44,18 @@ class WindowPolicy:
     """How windows are read and when a driver may start."""
 
     enforce: bool = True
-    midnight: str = DEFAULT_MIDNIGHT_POLICY
     earliest_start: float = 0.0
     latest_start: float = 24.0
 
     def window_for(self, stop: Stop) -> tuple[float, float]:
+        """The hours between which the stop will take the load."""
         if not self.enforce or not stop.has_window:
             return OPEN_ENDED
+
         open_at, close_at = float(stop.window_open), float(stop.window_close)
-        if open_at == 0.0 and close_at == 0.0 and self.midnight == MIDNIGHT_NO_WINDOW:
-            return OPEN_ENDED
-        if close_at < open_at:                 # window runs past midnight
+        if close_at == 0.0:                    # due by end of day, not midnight
+            close_at = END_OF_DAY
+        elif close_at < open_at:               # window runs past midnight
             close_at += 24.0
         return open_at, close_at
 

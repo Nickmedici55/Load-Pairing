@@ -2,7 +2,7 @@ import unittest
 
 from loadpairing.costing import cost_trip
 from loadpairing.models import Load, Stop
-from loadpairing.windows import MIDNIGHT_STRICT, WindowPolicy, schedule
+from loadpairing.windows import END_OF_DAY, WindowPolicy, schedule
 
 DC = "01020"
 
@@ -62,16 +62,31 @@ class SoloScheduleTest(unittest.TestCase):
         self.assertGreaterEqual(result.stops[0].arrive, 22.0)
 
 
-class MidnightPolicyTest(unittest.TestCase):
-    def test_zero_to_zero_is_read_as_no_window_by_default(self):
+class DeliveryTimeTest(unittest.TestCase):
+    """Window Close is the delivery time, and 00:00 means the end of the day."""
+
+    def test_a_midnight_close_is_due_by_2359_that_night(self):
+        policy = WindowPolicy()
+        self.assertEqual(policy.window_for(stop(open_at=0.0, close_at=0.0)), (0.0, END_OF_DAY))
+        self.assertEqual(policy.window_for(stop(open_at=6.0, close_at=0.0)), (6.0, END_OF_DAY))
+
+    def test_a_load_due_by_end_of_day_can_run_any_time(self):
         result = schedule([trip([stop(open_at=0.0, close_at=0.0)])], WindowPolicy(earliest_start=6.0))
         self.assertTrue(result.feasible)
         self.assertAlmostEqual(result.start_hour, 6.0)
 
-    def test_zero_to_zero_can_be_enforced_literally(self):
-        policy = WindowPolicy(midnight=MIDNIGHT_STRICT, earliest_start=6.0)
-        result = schedule([trip([stop(open_at=0.0, close_at=0.0)])], policy)
+    def test_end_of_day_is_still_a_deadline(self):
+        # Dispatched at 22:00 the driver cannot be there before midnight.
+        result = schedule([trip([stop(open_at=0.0, close_at=0.0)])], WindowPolicy(earliest_start=22.5))
         self.assertFalse(result.feasible)
+
+    def test_a_real_close_is_the_hour_the_load_is_due(self):
+        result = schedule([trip([stop(open_at=6.0, close_at=10.0)])], WindowPolicy())
+        self.assertTrue(result.feasible)
+        self.assertLessEqual(result.stops[0].arrive, 10.0)
+
+    def test_an_ordinary_window_running_past_midnight_still_wraps(self):
+        self.assertEqual(WindowPolicy().window_for(stop(open_at=22.0, close_at=2.0)), (22.0, 26.0))
 
 
 class PairScheduleTest(unittest.TestCase):

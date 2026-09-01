@@ -23,9 +23,16 @@ either way. The driver returns to Chicopee, reloads, and goes back out.
 |---|---|
 | Load at DC | 1.0 h, once per trip |
 | Each delivery stop | 1.0 h default, **overridable per location** |
+| Drop and hook stop | 0.5 h, fixed — beats the location override |
 | Line haul | miles ÷ 50 mph |
 
 Trip duration = 1.0 + Σ(stop dwell) + (round-trip miles / 50).
+
+`Window Close` is the delivery time: the hour the load is due at that stop. A
+close of `00:00` means the end of that day (23:59), not the start of it, and
+marks the stop as a **drop and hook** — the driver swaps trailers rather than
+waiting out a live unload, so that stop costs 0.5 h whatever the location's
+dwell says.
 
 The per-location dwell override is the core feature. A location is inserted at
 the 1.0 h default the first time its ZIP appears in any uploaded sheet. From
@@ -36,7 +43,7 @@ with use.
 
 - Combined duty time ≤ 14 h
 - Combined drive time ≤ 11 h
-- Delivery windows must be satisfiable in sequence — **not yet implemented**
+- Delivery windows must be satisfiable in sequence — **implemented**
 - Trailer type compatibility — **not yet decided**
 
 Matching is a max-weight maximum-cardinality matching over the graph of
@@ -88,23 +95,27 @@ The sheet layout is nonstandard and the parser depends on its quirks:
 - Columns used: `Carrier ID`, `Load ID`, `Trailer Equipment Type`, `Order`,
   `Store`, `Window Open`, `Window Close`, `City`, `State`, `Zip`,
   `Total Pallets Shipped`.
+- Carrier ID defaults to `PTAG`; reading every carrier on the sheet is opt-in.
 - ZIPs read back from pandas as floats. Cast and zero-pad to 5 characters.
 - Tabs 2 and 3 (`Reverse Order_2`, `Dispatch Order_3`) contain the same loads in
   opposite stop sequence. Use tab 3.
 
 ## Open decisions
 
-**1. Delivery window enforcement.** Of the 34 PTAG loads, 23 have wide
-11:00–20:00 windows and pair freely. Eight have hard morning windows — first
-stop opening at 05:15, 05:45, 06:14, 06:45, or 06:59. Two loads with early
-windows cannot be paired, because both need to be the first turn out. Three
-loads show 00:00–00:00, which likely means "no window" rather than midnight;
-confirm before treating it as a constraint.
+**1. Delivery window enforcement — settled and implemented.** Of the 34 PTAG
+loads, 23 have wide 11:00–20:00 windows and pair freely. Eight have hard
+morning windows — first stop opening at 05:15, 05:45, 06:14, 06:45, or 06:59.
+Two loads with early windows cannot be paired, because both need to be the
+first turn out.
 
-The pairing logic currently ignores windows entirely and only flags suspect
-pairs. It needs a real feasibility check: given a start time, simulate the first
-trip's arrival at each stop, then the second trip's, and reject the pair if any
-stop arrives after its window closes.
+The three loads showing 00:00–00:00 are **due by 23:59 that night** and are
+**drop and hooks**, 0.5 h on the ground. They are not "no window" and they are
+not midnight at the start of the day.
+
+The pairing logic now runs a real feasibility check rather than flagging
+suspect pairs: given a sequence of trips it finds a start time that lands every
+stop at or before its delivery time, and rejects the pair when none exists.
+Waiting on a window that has not opened counts against the 14 h duty limit.
 
 **2. Trailer type.** Equipment types present: `53LG` (liftgate), `53PLG`
 (liftgate pinwheel), `53RL` (roll door), `53PRL` (roll pinwheel), `48PLG`. The

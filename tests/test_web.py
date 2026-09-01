@@ -16,6 +16,7 @@ CENTROIDS = """zip,lat,lon
 01020,42.1487,-72.6079
 01040,42.2043,-72.6162
 01013,42.1626,-72.6076
+01085,42.1362,-72.7573
 12901,44.6995,-73.4529
 12946,44.2795,-73.9860
 """
@@ -27,6 +28,9 @@ LOADS = [
     {"load_id": "10375775", "equipment": "53RL", "stops": [
         {"store": "Chicopee St", "zip": 1013, "city": "Chicopee", "state": "MA",
          "open": hours(11.0), "close": hours(20.0), "pallets": 24}]},
+    {"load_id": "10375790", "equipment": "53PLG", "stops": [
+        {"store": "Westfield DC", "zip": 1085, "city": "Westfield", "state": "MA",
+         "open": hours(0.0), "close": hours(0.0), "pallets": 28}]},
     {"load_id": "10375781", "equipment": "53RL", "stops": [
         {"store": "Plattsburgh", "zip": 12901, "city": "Plattsburgh", "state": "NY",
          "open": hours(5.25), "close": hours(9.0), "pallets": 14},
@@ -125,7 +129,7 @@ class WebAppTest(unittest.TestCase):
 
     def post_plan(self, **overrides):
         fields = {"tab": "3", "carrier": "PTAG", "dc_zip": "01020", "earliest_start": "4",
-                  "max_duty": "14", "max_drive": "11", "midnight": "no-window",
+                  "max_duty": "14", "max_drive": "11",
                   "objective": "duty", "enforce_windows": "on"}
         fields.update(overrides)
         # An unticked checkbox is absent from a real submission, not empty.
@@ -138,6 +142,17 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")
         self.assertIn('action="/plan"', html)
         self.assertIn("Dispatch workbook", html)
+
+    def test_the_carrier_field_starts_on_ptag(self):
+        _status, html = self.request("/")
+        self.assertIn('name="carrier" value="PTAG"', html)
+
+    def test_a_midnight_delivery_time_shows_as_a_drop_and_hook(self):
+        self.prime_coordinates()
+        status, html = self.post_plan()
+        self.assertEqual(status, "200 OK")
+        self.assertIn("10375790", html)
+        self.assertIn("D&amp;H", html)          # escaped in the window column
 
     def test_health_check(self):
         status, body = self.request("/healthz")
