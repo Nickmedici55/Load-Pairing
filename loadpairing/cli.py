@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="only pair loads wanting the same trailer type",
     )
     plan_parser.add_argument("--no-windows", action="store_true", help="ignore delivery windows")
+    plan_parser.add_argument(
+        "--keep-stop-order",
+        action="store_true",
+        help="never reorder a load's stops, even when the sheet's order misses a delivery time",
+    )
     plan_parser.add_argument("--earliest-start", type=float, default=0.0, help="earliest dispatch hour")
     plan_parser.add_argument("--latest-start", type=float, default=24.0, help="latest dispatch hour")
     plan_parser.add_argument(
@@ -144,6 +149,7 @@ def _plan(args) -> int:
         match_equipment=args.match_equipment,
         objective=args.objective,
         matcher=args.matcher,
+        resequence=not args.keep_stop_order,
         windows=WindowPolicy(
             enforce=not args.no_windows,
             earliest_start=args.earliest_start,

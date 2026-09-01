@@ -75,8 +75,8 @@ would rather apply it by hand.
 the sheet.
 
 Useful `plan` options: `--router {auto,pcmiler,google,here,estimated}`,
-`--centroids FILE`, `--match-equipment`, `--no-windows`, `--earliest-start H`,
-`--max-duty H`, `--max-drive H`, `--schedule`, `--json`.
+`--centroids FILE`, `--match-equipment`, `--no-windows`, `--keep-stop-order`,
+`--earliest-start H`, `--max-duty H`, `--max-drive H`, `--schedule`, `--json`.
 
 ## The web app
 
@@ -141,6 +141,22 @@ A pair is feasible when combined duty is at most 14 h, combined drive is at
 most 11 h, every delivery window can still be met, and — if
 `--match-equipment` is set — both loads want the same trailer. Both running
 orders are tried and the better one is kept.
+
+## Stop order
+
+The stop order comes from the sheet, and it wins whenever it works. When it
+cannot meet every delivery time, other orders are tried and one that can is
+used instead. With around three stops to a load that is an exact enumeration,
+not a heuristic; above six stops only the earliest-deadline-first order is
+tried. Ties go to the order closest to how dispatch wrote it.
+
+Reordered loads are called out in the plan and listed in the JSON, so a
+dispatcher can see exactly what changed and overrule it. `--keep-stop-order`
+(or the checkbox on the form) turns it off and lets those loads fail instead,
+which is the way to see what the sheet's own order costs.
+
+This only fires when a load cannot be delivered as sequenced. It does not
+reorder stops to make a *pair* fit.
 
 ## Layovers
 
@@ -242,7 +258,7 @@ different height.
 python -m unittest discover -s tests -t .
 ```
 
-118 tests, no dependencies, under a second. They cover the parser against
+124 tests, no dependencies, under a second. They cover the parser against
 generated workbooks that reproduce the sheet's quirks, the costing arithmetic,
 window feasibility, the lane cache and dwell-override rules, and the planner
 end to end through both the CLI and the WSGI app — including multipart

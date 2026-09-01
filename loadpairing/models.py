@@ -95,6 +95,7 @@ class Trip:
     legs: tuple[Leg, ...]
     dwell_hours: tuple[float, ...]   # parallel to load.stops
     load_hours: float
+    resequenced: bool = False        # stops run in a different order to the sheet's
 
     @property
     def miles(self) -> float:

@@ -4,6 +4,12 @@ Pairing here means two sequential round trips on one driver, not two loads on
 one trailer: every load in the sample runs 21-28 pallets and fills a 53' either
 way, so the driver returns to Chicopee, reloads, and goes back out.
 
+The stop order comes from the sheet. When that order cannot meet every
+delivery time, other orders are tried and one that can is used instead -- the
+sheet's tab 2 holds the same loads in the opposite sequence, so the order is a
+suggestion rather than a constraint. The sheet's order always wins when it
+works, and any load that was reordered says so.
+
 A load whose own driving or duty is over a single shift's limit is not
 rejected: it runs solo with a layover, the driver sleeping out and finishing
 the next day. It just cannot be paired, being already more than a shift.
@@ -22,7 +28,8 @@ named by ``objective``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import itertools
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
 from .costing import DEFAULT_DWELL_HOURS, cost_trip
@@ -52,6 +59,10 @@ class PairingConfig:
     windows: WindowPolicy = field(default_factory=WindowPolicy)
     matcher: str = "auto"
     rest_hours: float = 10.0
+    resequence: bool = True
+    #: Above this many stops the permutations stop being worth enumerating and
+    #: only the earliest-delivery-time-first order is tried.
+    max_permuted_stops: int = 6
 
     @property
     def shift_limits(self) -> ShiftLimits:
@@ -124,6 +135,13 @@ class Plan:
         return tuple(a for a in self.assignments if a.is_layover)
 
     @property
+    def resequenced(self) -> tuple[Trip, ...]:
+        """Trips whose stops had to be reordered to meet their delivery times."""
+        return tuple(
+            trip for a in self.assignments for trip in a.trips if trip.resequenced
+        )
+
+    @property
     def load_count(self) -> int:
         return sum(len(a.trips) for a in self.assignments) + len(self.unschedulable)
 
@@ -143,8 +161,69 @@ def build_trips(
     dwell_for=None,
     config: PairingConfig = PairingConfig(),
 ) -> list[Trip]:
+    """Cost every load, reordering stops only where the sheet's order fails."""
     dwell_for = dwell_for or (lambda _zip: DEFAULT_DWELL_HOURS)
-    return [cost_trip(load, config.dc_zip, miles_for, dwell_for) for load in loads]
+    trips = []
+    for load in loads:
+        trip = cost_trip(load, config.dc_zip, miles_for, dwell_for)
+        if config.resequence and not schedule([trip], config.windows).feasible:
+            better = resequence(load, miles_for, dwell_for, config)
+            if better is not None:
+                trip = better
+        trips.append(trip)
+    return trips
+
+
+def delivery_order(stops) -> tuple:
+    """Stops sorted by the hour they are due, undated ones last."""
+    return tuple(
+        sorted(stops, key=lambda stop: stop.window_close if stop.has_window else float("inf"))
+    )
+
+
+def candidate_orders(stops, max_permuted: int):
+    """Stop orders worth trying, the earliest-deadline-first one included."""
+    yield delivery_order(stops)
+    if 2 <= len(stops) <= max_permuted:
+        yield from itertools.permutations(stops)
+
+
+def _inversions(order, original) -> int:
+    """How far an order strays from the sheet's."""
+    position = {id(stop): index for index, stop in enumerate(original)}
+    ranks = [position[id(stop)] for stop in order]
+    return sum(
+        1
+        for i in range(len(ranks))
+        for j in range(i + 1, len(ranks))
+        if ranks[i] > ranks[j]
+    )
+
+
+def resequence(load: Load, miles_for, dwell_for, config: PairingConfig) -> Optional[Trip]:
+    """The best stop order that meets every delivery time, or ``None``.
+
+    Ties are broken towards the sheet: of the orders that work, the one closest
+    to how dispatch wrote it wins.
+    """
+    if len(load.stops) < 2:
+        return None
+
+    best = None
+    for order in candidate_orders(load.stops, config.max_permuted_stops):
+        if order == load.stops:
+            continue                       # already known not to work
+        trip = cost_trip(
+            replace(load, stops=tuple(order)), config.dc_zip, miles_for, dwell_for
+        )
+        result = schedule([trip], config.windows)
+        if not result.feasible:
+            continue
+        key = (round(result.duty_hours, 6), _inversions(order, load.stops))
+        if best is None or key < best[0]:
+            best = (key, trip)
+
+    return replace(best[1], resequenced=True) if best else None
 
 
 def solo_schedule(trip: Trip, config: PairingConfig) -> Schedule:

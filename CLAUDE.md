@@ -47,6 +47,10 @@ with use.
   runs solo with a layover, the driver sleeping out and finishing the next
   day. It cannot be paired, being already more than a shift.
 - Delivery windows must be satisfiable in sequence — **implemented**
+- The sheet's stop order is a suggestion. When it cannot meet every delivery
+  time the stops are reordered and the load says so; the sheet's order always
+  wins when it works. Tab 2 holding the same loads in the opposite sequence is
+  the precedent for treating order as advisory.
 - Trailer type compatibility — **not yet decided**
 
 Matching is a max-weight maximum-cardinality matching over the graph of

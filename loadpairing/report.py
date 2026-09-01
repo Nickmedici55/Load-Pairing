@@ -47,6 +47,11 @@ def render(plan: Plan, show_schedule: bool = False) -> str:
         f"windows {'enforced' if config.windows.enforce else 'ignored'}; "
         f"equipment {'must match' if config.match_equipment else 'may differ'}"
     )
+    if plan.resequenced:
+        lines.append(
+            f"note: {plural(len(plan.resequenced), 'load')} had stops reordered -- the sheet's "
+            "order could not meet every delivery time"
+        )
     if plan.estimated_mileage:
         lines.append("note: some lanes use estimated mileage (great-circle x 1.20), not a routing source")
     lines.append("")
@@ -74,7 +79,9 @@ def render(plan: Plan, show_schedule: bool = False) -> str:
 def _headline(assignment: Assignment) -> str:
     trips = " + ".join(
         f"{trip.load.load_id} ({trip.load.equipment}, {plural(len(trip.load.stops), 'stop')}, "
-        f"{trip.miles:.0f} mi, {trip.duty_hours:.1f} h)"
+        f"{trip.miles:.0f} mi, {trip.duty_hours:.1f} h"
+        + (", resequenced" if trip.resequenced else "")
+        + ")"
         for trip in assignment.trips
     )
     tail = (
@@ -98,6 +105,7 @@ def as_dict(plan: Plan) -> dict:
         "pairs": len(plan.pairs),
         "solos": len(plan.solos),
         "layovers": len(plan.layovers),
+        "resequenced": [trip.load.load_id for trip in plan.resequenced],
         "solo_hours": round(plan.solo_hours, 2),
         "matcher": plan.matcher,
         "feasible_pairs": len(plan.candidates),
@@ -123,6 +131,9 @@ def as_dict(plan: Plan) -> dict:
                 "wait_hours": round(assignment.wait_hours, 2) or 0.0,
                 "miles": round(sum(trip.miles for trip in assignment.trips), 1),
                 "equipment": [trip.load.equipment for trip in assignment.trips],
+                "resequenced": [
+                    trip.load.load_id for trip in assignment.trips if trip.resequenced
+                ],
                 "stops": [
                     {
                         "load_id": scheduled.load_id,

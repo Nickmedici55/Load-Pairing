@@ -2,7 +2,14 @@ import unittest
 
 from loadpairing.costing import cost_trip
 from loadpairing.models import Load, Stop
-from loadpairing.pairing import Candidate, PairingConfig, evaluate_pair, plan
+from loadpairing.pairing import (
+    Candidate,
+    PairingConfig,
+    build_trips,
+    delivery_order,
+    evaluate_pair,
+    plan,
+)
 from loadpairing.windows import WindowPolicy
 
 DC = "01020"
@@ -99,6 +106,78 @@ class EvaluatePairTest(unittest.TestCase):
             make_trip("A1", 50, windows=(5.25, 6.5)), make_trip("B2", 50, windows=(5.75, 6.75)), config
         )
         self.assertNotIsInstance(outcome, Candidate)
+
+
+class ResequenceTest(unittest.TestCase):
+    """The sheet's stop order is a suggestion; a delivery time is not."""
+
+    def setUp(self):
+        # Two stops an hour out in opposite directions. Sheet order sends the
+        # driver to the late one first, so the early one is missed -- which is
+        # the shape of a real "cannot reach X by HH:MM" rejection.
+        self.late = Stop(order="1", store="Late", zip="90001", window_open=6.0, window_close=14.0)
+        self.early = Stop(order="2", store="Early", zip="90002", window_open=6.0, window_close=8.0)
+        self.miles = {
+            ("01020", "90001"): 50.0, ("90001", "01020"): 50.0,
+            ("01020", "90002"): 50.0, ("90002", "01020"): 50.0,
+            ("90001", "90002"): 150.0, ("90002", "90001"): 150.0,
+        }
+        self.config = PairingConfig(dc_zip=DC)
+
+    def miles_for(self, a, b):
+        return self.miles[(a, b)], "estimated"
+
+    def load(self, *stops):
+        return Load(load_id="L1", carrier_id="PTAG", equipment="53LG", stops=tuple(stops))
+
+    def test_sheet_order_that_misses_a_delivery_time_is_reordered(self):
+        trips = build_trips(
+            [self.load(self.late, self.early)], self.miles_for, lambda _z: 1.0, self.config
+        )
+        self.assertTrue(trips[0].resequenced)
+        self.assertEqual([s.store for s in trips[0].load.stops], ["Early", "Late"])
+        self.assertTrue(plan(trips, self.config).assignments)
+
+    def test_a_workable_sheet_order_is_left_alone(self):
+        trips = build_trips(
+            [self.load(self.early, self.late)], self.miles_for, lambda _z: 1.0, self.config
+        )
+        self.assertFalse(trips[0].resequenced)
+        self.assertEqual([s.store for s in trips[0].load.stops], ["Early", "Late"])
+
+    def test_keeping_the_sheet_order_lets_the_load_fail(self):
+        config = PairingConfig(dc_zip=DC, resequence=False)
+        trips = build_trips([self.load(self.late, self.early)], self.miles_for, lambda _z: 1.0, config)
+        self.assertFalse(trips[0].resequenced)
+        result = plan(trips, config)
+        self.assertEqual([r.load_ids for r in result.unschedulable], [("L1",)])
+        self.assertIn("cannot reach Early", result.unschedulable[0].reason)
+
+    def test_the_plan_names_what_it_reordered(self):
+        trips = build_trips(
+            [self.load(self.late, self.early)], self.miles_for, lambda _z: 1.0, self.config
+        )
+        result = plan(trips, self.config)
+        self.assertEqual([t.load.load_id for t in result.resequenced], ["L1"])
+
+    def test_no_order_works_means_the_load_still_fails(self):
+        impossible = Stop(order="2", store="Impossible", zip="90002",
+                          window_open=0.0, window_close=0.5)
+        trips = build_trips(
+            [self.load(self.late, impossible)], self.miles_for, lambda _z: 1.0, self.config
+        )
+        result = plan(trips, self.config)
+        self.assertTrue(result.unschedulable)
+
+    def test_stops_are_ranked_by_when_they_are_due(self):
+        self.assertEqual(
+            [s.store for s in delivery_order([self.late, self.early])], ["Early", "Late"]
+        )
+        undated = Stop(order="3", store="Anytime", zip="90003")
+        self.assertEqual(
+            [s.store for s in delivery_order([undated, self.late, self.early])],
+            ["Early", "Late", "Anytime"],
+        )
 
 
 class PlanTest(unittest.TestCase):

@@ -136,6 +136,7 @@ def plan_form(defaults: dict, message: str = "") -> str:
 <div class="checks">
   <label><input type="checkbox" name="enforce_windows"{checked('enforce_windows', True)}> Enforce delivery windows</label>
   <label><input type="checkbox" name="match_equipment"{checked('match_equipment')}> Pair only matching trailer types</label>
+  <label><input type="checkbox" name="keep_stop_order"{checked('keep_stop_order')}> Keep the sheet's stop order</label>
 </div>
 <button type="submit">Build the plan</button>
 <p class="hint">The driver leaves the DC at whatever hour lands them at the first stop of a turn
@@ -159,6 +160,13 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
         )
     if not config.windows.enforce:
         warnings.append("Delivery windows were ignored for this run.")
+    if result.resequenced:
+        warnings.append(
+            f"{len(result.resequenced)} load(s) had stops reordered because the sheet's order "
+            "could not meet every delivery time: "
+            + ", ".join(trip.load.load_id for trip in result.resequenced)
+            + ". Tick \u201cKeep the sheet's stop order\u201d to see them fail instead."
+        )
     if result.layovers:
         warnings.append(
             f"{len(result.layovers)} load(s) need a layover: more work than one shift holds, so the "
@@ -388,6 +396,7 @@ def _settings(form: Form) -> dict:
         "objective": form.get("objective", OBJECTIVE_DUTY),
         "enforce_windows": form.checked("enforce_windows"),
         "match_equipment": form.checked("match_equipment"),
+        "keep_stop_order": form.checked("keep_stop_order"),
     }
 
 
@@ -446,6 +455,7 @@ def _handle_plan(form: Form):
             max_drive_hours=form.number("max_drive", 11.0),
             match_equipment=settings["match_equipment"],
             objective=settings["objective"],
+            resequence=not settings["keep_stop_order"],
             windows=WindowPolicy(
                 enforce=settings["enforce_windows"],
                 earliest_start=form.number("earliest_start", 0.0),
