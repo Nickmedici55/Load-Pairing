@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "load-pairing"
+version = "0.1.0"
+description = "Cost daily dispatch loads as round trips and pair them onto drivers inside HOS limits"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# The tool runs on the standard library alone. These make it faster or more
+# accurate where they are available.
+postgres = ["psycopg[binary]>=3.1"]     # a postgresql:// database URL
+matching = ["networkx>=3.0"]            # the reference max-weight matcher
+geocoding = ["pgeocode>=0.4"]           # ZIP coordinates for the offline estimate
+
+[project.scripts]
+loadpairing = "loadpairing.cli:main"
+
+[tool.setuptools]
+packages = ["loadpairing"]
