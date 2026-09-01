@@ -15,6 +15,7 @@ dependencies = []
 postgres = ["psycopg[binary]>=3.1"]     # a postgresql:// database URL
 matching = ["networkx>=3.0"]            # the reference max-weight matcher
 geocoding = ["pgeocode>=0.4"]           # ZIP coordinates for the offline estimate
+web = ["gunicorn>=21.2"]                # serving loadpairing.web in production
 
 [project.scripts]
 loadpairing = "loadpairing.cli:main"

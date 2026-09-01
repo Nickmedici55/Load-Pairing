@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--schedule", action="store_true", help="print every stop on the clock")
     plan_parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
+    serve_parser = subparsers.add_parser("serve", help="run the web front end for local work")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=None, help="defaults to $PORT, else 8000")
+
     sheets_parser = subparsers.add_parser("sheets", help="list the tabs in a workbook")
     sheets_parser.add_argument("sheet")
 
@@ -88,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "plan":
             return _plan(args)
+        if args.command == "serve":
+            from .web import serve
+
+            serve(host=args.host, port=args.port)
+            return 0
         if args.command == "sheets":
             for index, name in enumerate(sheet_names(args.sheet), start=1):
                 print(f"{index}. {name}")

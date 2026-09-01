@@ -229,10 +229,15 @@ def connect(url: str | None = None) -> Store:
     """Open a store.
 
     ``url`` is a ``postgresql://`` URL or a path to a SQLite file. It defaults
-    to ``$LOAD_PAIRING_DB``, then to ``load_pairing.sqlite3`` in the working
-    directory.
+    to ``$LOAD_PAIRING_DB``, then to ``$DATABASE_URL`` (what a hosted Postgres
+    add-on sets), then to ``load_pairing.sqlite3`` in the working directory.
     """
-    url = url or os.environ.get("LOAD_PAIRING_DB") or "load_pairing.sqlite3"
+    url = (
+        url
+        or os.environ.get("LOAD_PAIRING_DB")
+        or os.environ.get("DATABASE_URL")
+        or "load_pairing.sqlite3"
+    )
 
     if url.startswith(("postgres://", "postgresql://")):
         try:

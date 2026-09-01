@@ -44,9 +44,10 @@ class EstimatedRouter:
 
     def miles(self, origin: Location, destination: Location) -> float:
         if None in (origin.lat, origin.lon, destination.lat, destination.lon):
+            missing = origin.zip if origin.lat is None or origin.lon is None else destination.zip
             raise RoutingError(
-                f"no coordinates for {origin.zip if origin.lat is None else destination.zip}; "
-                "load them with 'locations coords' or configure a routing API"
+                f"no coordinates on file for {missing}; either set a routing API key "
+                "(PCMILER_API_KEY, GOOGLE_MAPS_API_KEY or HERE_API_KEY) or load ZIP coordinates"
             )
         return estimated_miles(origin.lat, origin.lon, destination.lat, destination.lon)
 
