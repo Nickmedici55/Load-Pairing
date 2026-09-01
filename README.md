@@ -46,10 +46,12 @@ Three optional extras change how it runs, not what it does:
 | `psycopg` | a `postgresql://` database URL is refused; SQLite still works |
 | `networkx` | the built-in blossom matcher runs instead (same answer) |
 | `pgeocode` | ZIP coordinates must come from `--centroids` or be typed in |
+| `gunicorn` | use `loadpairing serve` (the stdlib server) instead |
 
 ### Commands
 
 ```
+loadpairing serve                               the web front end, on localhost:8000
 loadpairing sheets BOOK.xlsx                    list the tabs
 loadpairing plan BOOK.xlsx [options]            build the driver plan
 loadpairing locations list                      every ZIP seen, with its dwell
@@ -67,6 +69,42 @@ Useful `plan` options: `--router {auto,pcmiler,google,here,estimated}`,
 `--centroids FILE`, `--match-equipment`, `--no-windows`, `--midnight
 {no-window,strict}`, `--earliest-start H`, `--max-duty H`, `--max-drive H`,
 `--schedule`, `--json`.
+
+## The web app
+
+`loadpairing serve` (or gunicorn in production) puts the same thing behind a
+browser, which is what the spec's "uploaded sheet" and dispatcher-set dwell
+imply:
+
+* **/** — upload a workbook, pick the tab, carrier, DC ZIP and limits, get the
+  driver plan with every stop on the clock.
+* **/locations** — every ZIP any sheet has mentioned, with its dwell in an
+  editable field. This is where the data quality accrues. Also takes a
+  `zip,lat,lon` CSV for the offline mileage estimate.
+* **/lanes** — the mileage cache, with the estimated rows called out.
+* **/healthz** — plain `ok`, for a platform health check.
+
+It is a plain WSGI application (`loadpairing.web:application`) with no
+framework, so gunicorn, uWSGI or `wsgiref` all serve it.
+
+## Deploying
+
+`requirements.txt`, `gunicorn.conf.py` and `railpack.json` are all that a
+Railway-style deploy needs; the start command is
+`gunicorn loadpairing.web:application`, and the config file reads `$PORT`
+itself so nothing depends on shell expansion. On another platform, any WSGI
+host works — point it at `loadpairing.web:application`.
+
+Three environment variables matter:
+
+| Variable | Why |
+|---|---|
+| `DATABASE_URL` | a Postgres URL, e.g. from an attached database. **Without it the app falls back to SQLite on the container's disk, which most platforms wipe on every deploy** — taking every dwell override with it. Attach a database before anyone relies on this. |
+| `LOAD_PAIRING_PASSWORD` | turns on HTTP basic auth (user `dispatch`, or set `LOAD_PAIRING_USER`). **Unset, the app is open to anyone with the URL** — no login, and uploaded sheets and plans are readable. Set it on anything reachable from the internet. |
+| `PCMILER_API_KEY` / `GOOGLE_MAPS_API_KEY` / `HERE_API_KEY` | the routing source. With none set the app falls back to estimated mileage and needs ZIP coordinates from the Locations page. |
+
+`LOAD_PAIRING_DB` overrides `DATABASE_URL` if you want to point at something
+else, and `LOAD_PAIRING_ROUTER` pins the routing source instead of `auto`.
 
 ## How a load is costed
 
@@ -171,10 +209,11 @@ different height.
 python -m unittest discover -s tests -t .
 ```
 
-77 tests, no dependencies, under a second. They cover the parser against
+100 tests, no dependencies, under a second. They cover the parser against
 generated workbooks that reproduce the sheet's quirks, the costing arithmetic,
 window feasibility, the lane cache and dwell-override rules, and the planner
-end to end through the CLI.
+end to end through both the CLI and the WSGI app — including multipart
+uploads, the dwell round trip and basic auth.
 
 The matcher is checked against an exact subset DP on random graphs. Outside the
 suite it has been run against that oracle on 20,000 random graphs (up to 12

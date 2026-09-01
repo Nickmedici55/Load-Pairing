@@ -1,0 +1,4 @@
+# The tool itself needs nothing beyond the standard library. These are for
+# running it as a deployed web service.
+gunicorn>=21.2
+psycopg[binary]>=3.1
