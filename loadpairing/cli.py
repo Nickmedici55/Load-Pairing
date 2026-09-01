@@ -10,8 +10,8 @@ from . import db, geocode, report
 from .costing import DEFAULT_DWELL_HOURS
 from .mileage import ESTIMATED, MileageService, RoutingError, router_from_env
 from .pairing import OBJECTIVE_DUTY, OBJECTIVE_WAIT, PairingConfig, build_trips, plan
-from .parsing import ParseError, parse_workbook
-from .windows import MIDNIGHT_NO_WINDOW, MIDNIGHT_STRICT, WindowPolicy
+from .parsing import DEFAULT_CARRIER_ID, ParseError, parse_workbook
+from .windows import WindowPolicy
 from .xlsx import XlsxError, sheet_names
 
 DEFAULT_DC_ZIP = "01020"        # Chicopee MA
@@ -25,7 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser = subparsers.add_parser("plan", help="pair the loads on a dispatch sheet")
     plan_parser.add_argument("sheet", help="path to the dispatch .xlsx")
     plan_parser.add_argument("--tab", default="3", help="tab number or sheet name (default 3)")
-    plan_parser.add_argument("--carrier", default=None, help="only loads for this carrier ID, e.g. PTAG")
+    plan_parser.add_argument(
+        "--carrier",
+        default=DEFAULT_CARRIER_ID,
+        help=f"only loads for this carrier ID (default {DEFAULT_CARRIER_ID}; pass '' for every carrier)",
+    )
     plan_parser.add_argument("--header-row", type=int, default=6, help="zero-based header row (default 6)")
     plan_parser.add_argument("--dc-zip", default=DEFAULT_DC_ZIP, help=f"DC ZIP (default {DEFAULT_DC_ZIP})")
     plan_parser.add_argument(
@@ -43,12 +47,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="only pair loads wanting the same trailer type",
     )
     plan_parser.add_argument("--no-windows", action="store_true", help="ignore delivery windows")
-    plan_parser.add_argument(
-        "--midnight",
-        default=MIDNIGHT_NO_WINDOW,
-        choices=[MIDNIGHT_NO_WINDOW, MIDNIGHT_STRICT],
-        help="how to read a 00:00-00:00 window (default: treat it as no window)",
-    )
     plan_parser.add_argument("--earliest-start", type=float, default=0.0, help="earliest dispatch hour")
     plan_parser.add_argument("--latest-start", type=float, default=24.0, help="latest dispatch hour")
     plan_parser.add_argument(
@@ -113,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _plan(args) -> int:
     tab: int | str = int(args.tab) if str(args.tab).isdigit() else args.tab
-    parsed = parse_workbook(args.sheet, tab=tab, carrier_id=args.carrier, header_row=args.header_row)
+    parsed = parse_workbook(
+        args.sheet, tab=tab, carrier_id=args.carrier or None, header_row=args.header_row
+    )
     if not parsed.loads:
         print("error: no loads matched", file=sys.stderr)
         return 1
@@ -146,7 +146,6 @@ def _plan(args) -> int:
         matcher=args.matcher,
         windows=WindowPolicy(
             enforce=not args.no_windows,
-            midnight=args.midnight,
             earliest_start=args.earliest_start,
             latest_start=args.latest_start,
         ),

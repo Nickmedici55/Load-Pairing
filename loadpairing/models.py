@@ -31,6 +31,20 @@ class Stop:
     def has_window(self) -> bool:
         return self.window_open is not None and self.window_close is not None
 
+    @property
+    def delivery_time(self) -> Optional[float]:
+        """The appointment: Window Close is when the load is due."""
+        return self.window_close
+
+    @property
+    def is_drop_and_hook(self) -> bool:
+        """A 00:00 delivery time means a trailer swap, not a live unload.
+
+        It also means end of that day rather than the start of it -- see
+        :data:`loadpairing.windows.END_OF_DAY`.
+        """
+        return self.window_close == 0.0
+
     def __str__(self) -> str:
         where = ", ".join(p for p in (self.city, self.state) if p)
         return f"{self.store} ({where} {self.zip})" if where else f"{self.store} ({self.zip})"

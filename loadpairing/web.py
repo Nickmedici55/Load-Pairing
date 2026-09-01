@@ -24,8 +24,8 @@ from .costing import DEFAULT_DWELL_HOURS
 from .formdata import Form, FormError, read_form
 from .mileage import ESTIMATED, MileageService, RoutingError, router_from_env
 from .pairing import OBJECTIVE_DUTY, OBJECTIVE_WAIT, PairingConfig, build_trips, plan
-from .parsing import ParseError, parse_workbook
-from .windows import MIDNIGHT_NO_WINDOW, MIDNIGHT_STRICT, WindowPolicy
+from .parsing import DEFAULT_CARRIER_ID, ParseError, parse_workbook
+from .windows import WindowPolicy
 from .xlsx import XlsxError, sheet_names
 
 DEFAULT_DC_ZIP = "01020"        # Chicopee MA
@@ -118,7 +118,8 @@ def plan_form(defaults: dict, message: str = "") -> str:
   <div><label for="tab">Tab</label>
        <input id="tab" type="text" name="tab" value="{value('tab', '3')}"></div>
   <div><label for="carrier">Carrier ID</label>
-       <input id="carrier" type="text" name="carrier" value="{value('carrier')}" placeholder="all carriers"></div>
+       <input id="carrier" type="text" name="carrier" value="{value('carrier', DEFAULT_CARRIER_ID)}"
+              placeholder="blank for every carrier"></div>
   <div><label for="dc_zip">DC ZIP</label>
        <input id="dc_zip" type="text" name="dc_zip" value="{value('dc_zip', DEFAULT_DC_ZIP)}"></div>
   <div><label for="earliest_start">Earliest dispatch hour</label>
@@ -128,9 +129,6 @@ def plan_form(defaults: dict, message: str = "") -> str:
        <input id="max_duty" type="number" step="0.5" name="max_duty" value="{value('max_duty', '14')}"></div>
   <div><label for="max_drive">Drive limit (h)</label>
        <input id="max_drive" type="number" step="0.5" name="max_drive" value="{value('max_drive', '11')}"></div>
-  <div><label for="midnight">A 00:00-00:00 window means</label>
-       <select id="midnight" name="midnight">{options('midnight',
-         [(MIDNIGHT_NO_WINDOW, 'no window'), (MIDNIGHT_STRICT, 'exactly midnight')], MIDNIGHT_NO_WINDOW)}</select></div>
   <div><label for="objective">Tie-break</label>
        <select id="objective" name="objective">{options('objective',
          [(OBJECTIVE_DUTY, 'pack the fullest shifts'), (OBJECTIVE_WAIT, 'least waiting')], OBJECTIVE_DUTY)}</select></div>
@@ -141,8 +139,10 @@ def plan_form(defaults: dict, message: str = "") -> str:
 </div>
 <button type="submit">Build the plan</button>
 <p class="hint">Header row 6, stop rows carry a blank Carrier ID, tab 3 is the delivery order.
-Every ZIP in the sheet is recorded at a 1.0 h dwell the first time it is seen; adjust it under
-<a href="/locations">Locations</a> and it holds from then on.</p>
+Window Close is the delivery time; a 00:00 close means due by 23:59 that night and is treated as a
+drop and hook, 30 minutes on the ground. Every other ZIP in the sheet is recorded at a 1.0 h dwell
+the first time it is seen; adjust it under <a href="/locations">Locations</a> and it holds from
+then on.</p>
 </form>"""
 
 
@@ -364,12 +364,11 @@ def _message(text: str, kind: str = "note") -> str:
 def _settings(form: Form) -> dict:
     return {
         "tab": form.get("tab", "3") or "3",
-        "carrier": form.get("carrier"),
+        "carrier": form.get("carrier", DEFAULT_CARRIER_ID),
         "dc_zip": form.get("dc_zip", DEFAULT_DC_ZIP) or DEFAULT_DC_ZIP,
         "earliest_start": form.get("earliest_start", "4"),
         "max_duty": form.get("max_duty", "14"),
         "max_drive": form.get("max_drive", "11"),
-        "midnight": form.get("midnight", MIDNIGHT_NO_WINDOW),
         "objective": form.get("objective", OBJECTIVE_DUTY),
         "enforce_windows": form.checked("enforce_windows"),
         "match_equipment": form.checked("match_equipment"),
@@ -433,7 +432,6 @@ def _handle_plan(form: Form):
             objective=settings["objective"],
             windows=WindowPolicy(
                 enforce=settings["enforce_windows"],
-                midnight=settings["midnight"],
                 earliest_start=form.number("earliest_start", 0.0),
             ),
         )

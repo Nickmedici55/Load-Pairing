@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .models import Assignment
 from .pairing import Plan
+from .windows import END_OF_DAY
 
 
 def clock(hours: float) -> str:
@@ -16,10 +17,16 @@ def clock(hours: float) -> str:
     return f"{text} +{int(day)}d" if day >= 1 else text
 
 
+def delivery_time(stop) -> float:
+    """Window Close is the delivery time; 00:00 means the end of that day."""
+    return END_OF_DAY if stop.window_close == 0.0 else stop.window_close
+
+
 def window(stop) -> str:
     if not stop.has_window:
         return "any"
-    return f"{clock(stop.window_open)}-{clock(stop.window_close)}"
+    text = f"{clock(stop.window_open)}-{clock(delivery_time(stop))}"
+    return f"{text} D&H" if stop.is_drop_and_hook else text
 
 
 def plural(count: int, noun: str, suffix: str = "s") -> str:
@@ -99,7 +106,6 @@ def as_dict(plan: Plan) -> dict:
             "match_equipment": plan.config.match_equipment,
             "objective": plan.config.objective,
             "enforce_windows": plan.config.windows.enforce,
-            "midnight_policy": plan.config.windows.midnight,
         },
         "assignments": [
             {
@@ -123,6 +129,13 @@ def as_dict(plan: Plan) -> dict:
                         "wait_hours": round(scheduled.wait, 3) or 0.0,
                         "window_open": scheduled.stop.window_open,
                         "window_close": scheduled.stop.window_close,
+                        "delivery_time": (
+                            round(delivery_time(scheduled.stop), 3)
+                            if scheduled.stop.has_window
+                            else None
+                        ),
+                        "drop_and_hook": scheduled.stop.is_drop_and_hook,
+                        "dwell_hours": round(scheduled.dwell, 3),
                     }
                     for scheduled in assignment.schedule
                 ],

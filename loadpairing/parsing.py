@@ -21,6 +21,10 @@ from .xlsx import SerialDateTime, Sheet, read_sheet
 
 DEFAULT_HEADER_ROW = 6
 
+#: The carrier these sheets are read for. Passing an empty carrier reads every
+#: carrier on the sheet instead.
+DEFAULT_CARRIER_ID = "PTAG"
+
 CARRIER_ID = "Carrier ID"
 LOAD_ID = "Load ID"
 EQUIPMENT = "Trailer Equipment Type"

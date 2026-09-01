@@ -6,28 +6,33 @@ inside HOS limits.
 
 `CLAUDE.md` holds the project spec this implements.
 
-Sample output, against a generated sheet with estimated mileage:
+Sample output, against a generated sheet with estimated mileage. `--carrier`
+already defaults to `PTAG`, so the OTHR load on the sheet is left out:
 
 ```
-$ loadpairing plan dispatch.xlsx --tab 3 --carrier PTAG --earliest-start 4 --schedule
+$ loadpairing plan dispatch.xlsx --earliest-start 4 --schedule
 
-Dispatch Order_3: 4 loads, 7 stops
+Dispatch Order_3: 5 loads, 7 stops
 
-4 loads -> 2 drivers (1 pair + 1 solo, 1 unschedulable)
-7.7 h of driver time if every schedulable load ran on its own; 3 feasible pairs found, matched by builtin
+5 loads -> 2 drivers (2 pairs + 0 solo, 1 unschedulable)
+11.1 h of driver time if every schedulable load ran on its own; 6 feasible pairs found, matched by builtin
 limits: 14 h duty, 11 h drive; windows enforced; equipment may differ
 note: some lanes use estimated mileage (great-circle x 1.20), not a routing source
 
-Driver  1  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375774 (53LG, 1 stop, 9 mi, 2.2 h)  ->  06:24-12:06  5.7 h duty, 0.7 h drive
-            10375778  07:28-08:28  Springfield (Springfield, MA 01109)  window 06:15-11:00
-            10375778  08:43-09:43  Westfield (Westfield, MA 01085)  window any
+Driver  1  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375790 (53PLG, 1 stop, 93 mi, 3.4 h)  ->  05:10-12:02  6.9 h duty, 2.4 h drive
+            10375778  06:15-07:15  Springfield (Springfield, MA 01109)  window 06:15-11:00
+            10375778  07:30-08:30  Westfield (Westfield, MA 01085)  window any
+            10375790  10:37-11:07  Pittsfield DC (Pittsfield, MA 01201)  window 00:00-23:59 D&H
+Driver  2  10375774 (53LG, 1 stop, 9 mi, 2.2 h) + 10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  09:54-14:08  4.2 h duty, 0.2 h drive
             10375774  11:00-12:00  Holyoke (Holyoke, MA 01040)  window 11:00-20:00
-Driver  2  10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  09:59-12:01  2.0 h duty, 0.0 h drive
-            10375775  11:00-12:00  Chicopee St (Chicopee, MA 01013)  window 11:00-20:00
+            10375775  13:07-14:07  Chicopee St (Chicopee, MA 01013)  window 11:00-20:00
 
 Unschedulable:
-  10375781: 11.5 h driving exceeds the 11 h limit on its own
+  10375781: 11.4 h driving exceeds the 11 h limit on its own
 ```
+
+The Pittsfield stop is the drop and hook: due by 23:59, half an hour on the
+ground rather than the location's dwell.
 
 ## Running it
 
@@ -65,10 +70,12 @@ it defaults to `load_pairing.sqlite3` in the working directory. The schema is
 created on first connect; `schema/postgres.sql` is the same DDL for a DBA who
 would rather apply it by hand.
 
+`--carrier` defaults to `PTAG`; pass `--carrier ""` to read every carrier on
+the sheet.
+
 Useful `plan` options: `--router {auto,pcmiler,google,here,estimated}`,
-`--centroids FILE`, `--match-equipment`, `--no-windows`, `--midnight
-{no-window,strict}`, `--earliest-start H`, `--max-duty H`, `--max-drive H`,
-`--schedule`, `--json`.
+`--centroids FILE`, `--match-equipment`, `--no-windows`, `--earliest-start H`,
+`--max-duty H`, `--max-drive H`, `--schedule`, `--json`.
 
 ## The web app
 
@@ -121,6 +128,10 @@ Dwell defaults to 1.0 h and is overridable per location. A ZIP is inserted into
 from then on the tool reads whatever the dispatcher has set — a later upload of
 the same ZIP never overwrites it. Data quality improves with use.
 
+A **drop and hook** is the exception: 0.5 h, fixed, whatever the location's
+dwell says. The override describes how long a live unload takes there, and a
+trailer swap is not one.
+
 Pairing means two sequential round trips on one driver, not two loads on one
 trailer: every load in the sample runs 21–28 pallets and fills a 53' either
 way, so the driver returns to the DC, reloads, and goes back out.
@@ -156,9 +167,10 @@ The offline estimate needs ZIP coordinates, which come from `--centroids`
 
 ## Delivery windows
 
-Spec open decision #1, now implemented. Given a driver's trips, the scheduler
-finds a start time that lands every stop inside its window, or reports which
-stop it cannot reach in time.
+`Window Close` is the delivery time — the hour the load is due at that stop —
+and `Window Open` is the earliest the receiver will take it. Given a driver's
+trips, the scheduler finds a start time that lands every stop at or before its
+delivery time, or reports which stop it cannot reach in time.
 
 The search is exact rather than a scan over candidate start times: arrival at
 every stop is non-decreasing in the start time, so meeting every window close
@@ -170,9 +182,9 @@ for no reason. Waiting on a window counts against the 14 h duty limit.
 
 Two things are worth knowing:
 
-* **`00:00–00:00` is read as "no window"** by default, which is what the spec
-  suspects it means. `--midnight strict` treats it literally instead. This
-  still needs confirming against the source system.
+* **A `00:00` close means 23:59 that night, not midnight at the start of the
+  day.** It also marks the stop as a drop and hook, priced at 0.5 h. So those
+  loads are due by end of day and cost half an hour on the ground.
 * **`--earliest-start` matters more than it looks.** It is the hour before
   which no driver may be dispatched, and it is what makes a hard morning window
   unpairable behind another turn. It defaults to `0.0`, which lets the
@@ -209,7 +221,7 @@ different height.
 python -m unittest discover -s tests -t .
 ```
 
-100 tests, no dependencies, under a second. They cover the parser against
+111 tests, no dependencies, under a second. They cover the parser against
 generated workbooks that reproduce the sheet's quirks, the costing arithmetic,
 window feasibility, the lane cache and dwell-override rules, and the planner
 end to end through both the CLI and the WSGI app — including multipart
