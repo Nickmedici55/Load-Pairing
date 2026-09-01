@@ -2,7 +2,7 @@ import unittest
 
 from loadpairing.costing import cost_trip
 from loadpairing.models import Load, Stop
-from loadpairing.windows import END_OF_DAY, WindowPolicy, schedule
+from loadpairing.windows import END_OF_DAY, WindowPolicy, anchored_start, flatten, schedule
 
 DC = "01020"
 
@@ -31,22 +31,52 @@ class SoloScheduleTest(unittest.TestCase):
         self.assertAlmostEqual(result.stops[0].arrive, 6.0)
         self.assertAlmostEqual(result.stops[0].wait, 0.0)
 
-    def test_a_window_that_closes_before_the_driver_can_get_there_is_infeasible(self):
+    def test_a_delivery_time_the_driver_cannot_make_is_infeasible(self):
         policy = WindowPolicy(earliest_start=9.0)
         result = schedule([trip([stop(open_at=5.0, close_at=9.5)])], policy)
         self.assertFalse(result.feasible)
-        self.assertIn("window closes", result.reason)
+        self.assertIn("cannot reach", result.reason)
 
-    def test_waiting_is_only_taken_when_two_windows_leave_no_choice(self):
+    def test_the_reason_names_the_deadline_and_the_earliest_arrival(self):
+        policy = WindowPolicy(earliest_start=9.0)
+        result = schedule([trip([stop(open_at=5.0, close_at=9.5)])], policy)
+        self.assertIn("by 09:30", result.reason)        # the delivery time
+        self.assertIn("09:00", result.reason)           # when the driver could leave
+        self.assertIn("11:00", result.reason)           # when they would get there
+
+    def test_the_start_is_anchored_on_the_first_stop_opening(self):
+        # 1 h loading plus a 1 h run out, so a 06:00 opening means a 04:00 start.
+        one = trip([stop(open_at=6.0, close_at=10.0)])
+        tasks, _tail = flatten([one], WindowPolicy())
+        self.assertAlmostEqual(anchored_start(tasks), 4.0)
+
+        result = schedule([one], WindowPolicy())
+        self.assertAlmostEqual(result.start_hour, 4.0)
+        self.assertAlmostEqual(result.stops[0].arrive, 6.0)
+
+    def test_a_later_stop_may_still_have_to_wait(self):
+        # Anchoring on the first stop is the earliest the trip can progress;
+        # a second stop that opens much later is waited on all the same.
         early = stop(open_at=6.0, close_at=7.0, store="Early")
         late = Stop(order="2", store="Late", zip="01013", window_open=14.0, window_close=20.0)
         one = trip([early, late])
         result = schedule([one], WindowPolicy())
         self.assertTrue(result.feasible)
-        self.assertAlmostEqual(result.stops[0].arrive, 7.0)     # as late as the first window allows
-        self.assertAlmostEqual(result.stops[1].arrive, 9.0)
-        self.assertAlmostEqual(result.stops[1].wait, 5.0)       # held until 14:00
-        self.assertAlmostEqual(result.duty_hours, one.duty_hours + 5.0)
+        self.assertAlmostEqual(result.start_hour, 4.0)
+        self.assertAlmostEqual(result.stops[0].arrive, 6.0)     # exactly as it opens
+        self.assertAlmostEqual(result.stops[1].arrive, 8.0)
+        self.assertAlmostEqual(result.stops[1].wait, 6.0)       # held until 14:00
+        self.assertAlmostEqual(result.duty_hours, one.duty_hours + 6.0)
+
+    def test_a_start_the_operation_forbids_falls_back(self):
+        # A 05:00 opening would need a 03:00 start; dispatch opens at 04:00,
+        # so the day starts then and the stop is reached after it opens.
+        one = trip([stop(open_at=5.0, close_at=12.0)])
+        result = schedule([one], WindowPolicy(earliest_start=4.0))
+        self.assertTrue(result.feasible)
+        self.assertGreaterEqual(result.start_hour, 4.0)
+        self.assertGreaterEqual(result.stops[0].arrive, 5.0)
+        self.assertAlmostEqual(result.stops[0].wait, 0.0)
 
     def test_the_driver_is_not_held_at_the_dc_when_waiting_can_be_avoided(self):
         first = stop(open_at=0.0, close_at=24.0, store="Anytime")
@@ -90,6 +120,18 @@ class DeliveryTimeTest(unittest.TestCase):
 
 
 class PairScheduleTest(unittest.TestCase):
+    def test_the_second_turn_is_held_at_the_dc_not_at_the_receiver(self):
+        # Turn one finishes early; rather than park at the customer's door the
+        # driver waits at the DC and arrives as the second stop opens.
+        first = trip([stop(store="A", open_at=6.0, close_at=8.0)], load_id="A")
+        second = trip([stop(store="B", zip_code="01013", open_at=14.0, close_at=18.0)], load_id="B")
+        result = schedule([first, second], WindowPolicy())
+        self.assertTrue(result.feasible)
+        self.assertAlmostEqual(result.stops[0].arrive, 6.0)
+        self.assertAlmostEqual(result.stops[1].arrive, 14.0)
+        self.assertAlmostEqual(result.stops[1].wait, 0.0)
+        self.assertAlmostEqual(result.finish_hour, 16.0)
+
     def test_two_trips_run_back_to_back_through_the_dc(self):
         first = trip([stop(store="A")], load_id="A")
         second = trip([stop(store="B", zip_code="01013")], load_id="B")

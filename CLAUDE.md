@@ -43,6 +43,9 @@ with use.
 
 - Combined duty time ≤ 14 h
 - Combined drive time ≤ 11 h
+- A load whose own duty or drive is over those limits is **not rejected** — it
+  runs solo with a layover, the driver sleeping out and finishing the next
+  day. It cannot be paired, being already more than a shift.
 - Delivery windows must be satisfiable in sequence — **implemented**
 - Trailer type compatibility — **not yet decided**
 
@@ -112,10 +115,17 @@ The three loads showing 00:00–00:00 are **due by 23:59 that night** and are
 **drop and hooks**, 0.5 h on the ground. They are not "no window" and they are
 not midnight at the start of the day.
 
-The pairing logic now runs a real feasibility check rather than flagging
-suspect pairs: given a sequence of trips it finds a start time that lands every
-stop at or before its delivery time, and rejects the pair when none exists.
-Waiting on a window that has not opened counts against the 14 h duty limit.
+The driver leaves Chicopee at whatever hour lands them at the first stop of a
+turn exactly as `Window Open` says it opens — no earlier, so nobody sits at a
+receiver's door, and no later, so nothing downstream is given away. On the
+second turn of a pair the driver holds at the DC rather than at the customer.
+Only a real "no dispatch before" hour overrides that anchor, and then the day
+starts as late as it can without missing a delivery time.
+
+The pairing logic runs a real feasibility check rather than flagging suspect
+pairs: it rejects a pair when no start time lands every stop at or before its
+delivery time. Waiting on a stop that has not opened counts against the 14 h
+duty limit.
 
 **2. Trailer type.** Equipment types present: `53LG` (liftgate), `53PLG`
 (liftgate pinwheel), `53RL` (roll door), `53PRL` (roll pinwheel), `48PLG`. The
@@ -132,7 +142,7 @@ enforcement:
 - 34 loads, 242 total hours if each runs solo
 - 15 pairs + 4 solo = **19 drivers instead of 34**
 - Load `10375781` (Plattsburgh / Massena / Lake Placid NY, 574 mi, 15.5 h)
-  exceeds the 14 h duty limit on its own and cannot run in a single shift
+  exceeds the 14 h duty limit on its own, so it runs as a layover
 - Shortest load is `10375774` (Holyoke MA, 1 stop, 9 mi round trip, 2.2 h)
 
 Adding window enforcement will reduce the pair count. That's expected, not a

@@ -122,9 +122,9 @@ def plan_form(defaults: dict, message: str = "") -> str:
               placeholder="blank for every carrier"></div>
   <div><label for="dc_zip">DC ZIP</label>
        <input id="dc_zip" type="text" name="dc_zip" value="{value('dc_zip', DEFAULT_DC_ZIP)}"></div>
-  <div><label for="earliest_start">Earliest dispatch hour</label>
+  <div><label for="earliest_start">No dispatch before</label>
        <input id="earliest_start" type="number" step="0.25" min="0" max="24" name="earliest_start"
-              value="{value('earliest_start', '4')}"></div>
+              value="{value('earliest_start', '0')}" title="0 lets the delivery times decide"></div>
   <div><label for="max_duty">Duty limit (h)</label>
        <input id="max_duty" type="number" step="0.5" name="max_duty" value="{value('max_duty', '14')}"></div>
   <div><label for="max_drive">Drive limit (h)</label>
@@ -138,7 +138,10 @@ def plan_form(defaults: dict, message: str = "") -> str:
   <label><input type="checkbox" name="match_equipment"{checked('match_equipment')}> Pair only matching trailer types</label>
 </div>
 <button type="submit">Build the plan</button>
-<p class="hint">Header row 6, stop rows carry a blank Carrier ID, tab 3 is the delivery order.
+<p class="hint">The driver leaves the DC at whatever hour lands them at the first stop of a turn
+exactly as it opens, so leave <em>No dispatch before</em> at 0 unless there is a real hour before
+which nobody rolls -- raising it can only make loads unschedulable.
+Header row 6, stop rows carry a blank Carrier ID, tab 3 is the delivery order.
 Window Close is the delivery time; a 00:00 close means due by 23:59 that night and is treated as a
 drop and hook, 30 minutes on the ground. Every other ZIP in the sheet is recorded at a 1.0 h dwell
 the first time it is seen; adjust it under <a href="/locations">Locations</a> and it holds from
@@ -156,6 +159,12 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
         )
     if not config.windows.enforce:
         warnings.append("Delivery windows were ignored for this run.")
+    if result.layovers:
+        warnings.append(
+            f"{len(result.layovers)} load(s) need a layover: more work than one shift holds, so the "
+            "driver sleeps out. Delivery times are not checked across the break -- the sheet gives "
+            "an hour of the day, not a date, so which day each stop is due on is a dispatcher's call."
+        )
 
     rows = "".join(
         f"<tr><td>{esc(', '.join(rejection.load_ids))}</td><td>{esc(rejection.reason)}</td></tr>"
@@ -172,7 +181,8 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
 <div class="stats">
   <div class="stat"><b>{result.drivers}</b><span>drivers</span></div>
   <div class="stat"><b>{len(result.pairs)}</b><span>pairs</span></div>
-  <div class="stat"><b>{len(result.solos)}</b><span>solo</span></div>
+  <div class="stat"><b>{len([a for a in result.solos if not a.is_layover])}</b><span>solo</span></div>
+  <div class="stat"><b>{len(result.layovers)}</b><span>layover</span></div>
   <div class="stat"><b>{len(result.unschedulable)}</b><span>unschedulable</span></div>
   <div class="stat"><b>{result.solo_hours:.1f}</b><span>driver hours if unpaired</span></div>
   <div class="stat"><b>{len(result.candidates)}</b><span>feasible pairs</span></div>
@@ -196,6 +206,12 @@ def _driver(index: int, assignment) -> str:
         for trip in assignment.trips
     )
     waiting = f", {assignment.wait_hours:.1f} h waiting" if assignment.wait_hours > 1e-6 else ""
+    layover = (
+        f'<span class="tag">layover: {assignment.shifts} shifts, '
+        f'{assignment.rest_hours:.0f} h rest</span>'
+        if assignment.is_layover
+        else ""
+    )
     stops = "".join(
         f"<tr><td>{esc(s.load_id)}</td>"
         f'<td class="num">{report.clock(s.arrive)} - {report.clock(s.depart)}</td>'
@@ -207,7 +223,7 @@ def _driver(index: int, assignment) -> str:
     return f"""<div class="driver"><div class="head">
 <span class="who">Driver {index}</span><span>{loads}</span>
 <span class="meta">{report.clock(assignment.start_hour)} - {report.clock(assignment.finish_hour)},
-{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>
+{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}
 </div><table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
 {stops}</table></div>"""
 
@@ -366,7 +382,7 @@ def _settings(form: Form) -> dict:
         "tab": form.get("tab", "3") or "3",
         "carrier": form.get("carrier", DEFAULT_CARRIER_ID),
         "dc_zip": form.get("dc_zip", DEFAULT_DC_ZIP) or DEFAULT_DC_ZIP,
-        "earliest_start": form.get("earliest_start", "4"),
+        "earliest_start": form.get("earliest_start", "0"),
         "max_duty": form.get("max_duty", "14"),
         "max_drive": form.get("max_drive", "11"),
         "objective": form.get("objective", OBJECTIVE_DUTY),

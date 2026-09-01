@@ -147,6 +147,14 @@ class WebAppTest(unittest.TestCase):
         _status, html = self.request("/")
         self.assertIn('name="carrier" value="PTAG"', html)
 
+    def test_a_load_over_one_shift_is_shown_as_a_layover_not_a_failure(self):
+        self.prime_coordinates()
+        status, html = self.post_plan()
+        self.assertEqual(status, "200 OK")
+        self.assertIn("10375781", html)          # the Adirondack run
+        self.assertIn("layover", html)
+        self.assertNotIn("exceeds the 11 h limit", html)
+
     def test_a_midnight_delivery_time_shows_as_a_drop_and_hook(self):
         self.prime_coordinates()
         status, html = self.post_plan()

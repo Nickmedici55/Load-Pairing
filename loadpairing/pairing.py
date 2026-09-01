@@ -4,6 +4,10 @@ Pairing here means two sequential round trips on one driver, not two loads on
 one trailer: every load in the sample runs 21-28 pallets and fills a 53' either
 way, so the driver returns to Chicopee, reloads, and goes back out.
 
+A load whose own driving or duty is over a single shift's limit is not
+rejected: it runs solo with a layover, the driver sleeping out and finishing
+the next day. It just cannot be paired, being already more than a shift.
+
 A pair is feasible when, in one order or the other:
 
 * combined duty time is at most 14 h,
@@ -24,7 +28,7 @@ from typing import Iterable, Optional
 from .costing import DEFAULT_DWELL_HOURS, cost_trip
 from .matching import max_weight_matching
 from .models import Assignment, Load, Trip
-from .windows import Schedule, WindowPolicy, schedule
+from .windows import Schedule, ShiftLimits, WindowPolicy, schedule, schedule_layover
 
 MAX_DUTY_HOURS = 14.0
 MAX_DRIVE_HOURS = 11.0
@@ -47,6 +51,21 @@ class PairingConfig:
     objective: str = OBJECTIVE_DUTY
     windows: WindowPolicy = field(default_factory=WindowPolicy)
     matcher: str = "auto"
+    rest_hours: float = 10.0
+
+    @property
+    def shift_limits(self) -> ShiftLimits:
+        return ShiftLimits(
+            max_duty=self.max_duty_hours,
+            max_drive=self.max_drive_hours,
+            rest_hours=self.rest_hours,
+        )
+
+    def fits_one_shift(self, trip: Trip) -> bool:
+        return (
+            trip.drive_hours <= self.max_drive_hours + 1e-9
+            and trip.duty_hours <= self.max_duty_hours + 1e-9
+        )
 
 
 @dataclass(frozen=True)
@@ -99,6 +118,10 @@ class Plan:
     @property
     def solos(self) -> tuple[Assignment, ...]:
         return tuple(a for a in self.assignments if not a.is_pair)
+
+    @property
+    def layovers(self) -> tuple[Assignment, ...]:
+        return tuple(a for a in self.assignments if a.is_layover)
 
     @property
     def load_count(self) -> int:
@@ -183,28 +206,21 @@ def plan(trips: Iterable[Trip], config: PairingConfig = PairingConfig()) -> Plan
     unschedulable: list[Rejection] = []
     solo: dict[str, Schedule] = {}
 
+    layovers: list[tuple[Trip, Schedule]] = []
+
     for trip in trips:
-        if trip.drive_hours > config.max_drive_hours + 1e-9:
-            unschedulable.append(
-                Rejection(
-                    (trip.load.load_id,),
-                    f"{trip.drive_hours:.1f} h driving exceeds the "
-                    f"{config.max_drive_hours:g} h limit on its own",
-                )
-            )
+        if not config.fits_one_shift(trip):
+            # More than one shift of work. The driver sleeps out; the load is
+            # not pairable, but it is not impossible either.
+            layovers.append((trip, schedule_layover([trip], config.windows, config.shift_limits)))
             continue
         result = solo_schedule(trip, config)
         if not result.feasible:
             unschedulable.append(Rejection((trip.load.load_id,), result.reason))
             continue
         if result.duty_hours > config.max_duty_hours + 1e-9:
-            unschedulable.append(
-                Rejection(
-                    (trip.load.load_id,),
-                    f"{result.duty_hours:.1f} h on duty exceeds the "
-                    f"{config.max_duty_hours:g} h limit and cannot run in a single shift",
-                )
-            )
+            # The work fits a shift; waiting on delivery times is what does not.
+            layovers.append((trip, schedule_layover([trip], config.windows, config.shift_limits)))
             continue
         schedulable.append(trip)
         solo[trip.load.load_id] = result
@@ -245,6 +261,18 @@ def plan(trips: Iterable[Trip], config: PairingConfig = PairingConfig()) -> Plan
                 start_hour=result.start_hour,
                 finish_hour=result.finish_hour,
                 schedule=result.stops,
+            )
+        )
+
+    for trip, result in layovers:
+        assignments.append(
+            Assignment(
+                trips=(trip,),
+                start_hour=result.start_hour,
+                finish_hour=result.finish_hour,
+                schedule=result.stops,
+                shifts=result.shifts,
+                rest_hours=result.rest_hours,
             )
         )
 

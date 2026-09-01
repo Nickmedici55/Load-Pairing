@@ -4,17 +4,11 @@ from __future__ import annotations
 
 from .models import Assignment
 from .pairing import Plan
-from .windows import END_OF_DAY
+from .windows import END_OF_DAY, format_hour
 
 
-def clock(hours: float) -> str:
-    """``6.25`` -> ``06:15``; anything past midnight is marked ``+1d``."""
-    day, rest = divmod(hours, 24.0)
-    minutes = int(round(rest * 60))
-    if minutes == 1440:
-        day, minutes = day + 1, 0
-    text = f"{minutes // 60:02d}:{minutes % 60:02d}"
-    return f"{text} +{int(day)}d" if day >= 1 else text
+#: Hours are rendered the same way wherever they appear.
+clock = format_hour
 
 
 def delivery_time(stop) -> float:
@@ -37,7 +31,10 @@ def render(plan: Plan, show_schedule: bool = False) -> str:
     lines: list[str] = []
     config = plan.config
 
-    makeup = f"{plural(len(plan.pairs), 'pair')} + {len(plan.solos)} solo"
+    single_shift_solos = [a for a in plan.solos if not a.is_layover]
+    makeup = f"{plural(len(plan.pairs), 'pair')} + {len(single_shift_solos)} solo"
+    if plan.layovers:
+        makeup += f" + {plural(len(plan.layovers), 'layover')}"
     if plan.unschedulable:
         makeup += f", {len(plan.unschedulable)} unschedulable"
     lines.append(f"{plural(plan.load_count, 'load')} -> {plural(plan.drivers, 'driver')} ({makeup})")
@@ -86,6 +83,11 @@ def _headline(assignment: Assignment) -> str:
     )
     if assignment.wait_hours > 1e-6:
         tail += f", {assignment.wait_hours:.1f} h waiting"
+    if assignment.is_layover:
+        tail += (
+            f"  [layover: {assignment.shifts} shifts, "
+            f"{assignment.rest_hours:.0f} h rest; delivery times need a dispatcher]"
+        )
     return trips + tail
 
 
@@ -95,6 +97,7 @@ def as_dict(plan: Plan) -> dict:
         "drivers": plan.drivers,
         "pairs": len(plan.pairs),
         "solos": len(plan.solos),
+        "layovers": len(plan.layovers),
         "solo_hours": round(plan.solo_hours, 2),
         "matcher": plan.matcher,
         "feasible_pairs": len(plan.candidates),
@@ -114,6 +117,9 @@ def as_dict(plan: Plan) -> dict:
                 "finish": round(assignment.finish_hour, 3),
                 "duty_hours": round(assignment.duty_hours, 2),
                 "drive_hours": round(assignment.drive_hours, 2),
+                "shifts": assignment.shifts,
+                "layover": assignment.is_layover,
+                "rest_hours": round(assignment.rest_hours, 2),
                 "wait_hours": round(assignment.wait_hours, 2) or 0.0,
                 "miles": round(sum(trip.miles for trip in assignment.trips), 1),
                 "equipment": [trip.load.equipment for trip in assignment.trips],
