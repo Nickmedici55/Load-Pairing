@@ -127,10 +127,17 @@ class Assignment:
     start_hour: float
     finish_hour: float
     schedule: tuple["ScheduledStop", ...] = field(default_factory=tuple)
+    shifts: int = 1
+    rest_hours: float = 0.0
 
     @property
     def is_pair(self) -> bool:
         return len(self.trips) == 2
+
+    @property
+    def is_layover(self) -> bool:
+        """More work than one shift holds: the driver sleeps out."""
+        return self.shifts > 1
 
     @property
     def load_ids(self) -> tuple[str, ...]:
@@ -142,8 +149,8 @@ class Assignment:
 
     @property
     def duty_hours(self) -> float:
-        """Elapsed on-duty time, including any wait on a closed window."""
-        return self.finish_hour - self.start_hour
+        """On-duty time: elapsed, less any rest taken on a layover."""
+        return self.finish_hour - self.start_hour - self.rest_hours
 
     @property
     def working_hours(self) -> float:

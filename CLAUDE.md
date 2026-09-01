@@ -43,6 +43,9 @@ with use.
 
 - Combined duty time ≤ 14 h
 - Combined drive time ≤ 11 h
+- A load whose own duty or drive is over those limits is **not rejected** — it
+  runs solo with a layover, the driver sleeping out and finishing the next
+  day. It cannot be paired, being already more than a shift.
 - Delivery windows must be satisfiable in sequence — **implemented**
 - Trailer type compatibility — **not yet decided**
 
@@ -139,7 +142,7 @@ enforcement:
 - 34 loads, 242 total hours if each runs solo
 - 15 pairs + 4 solo = **19 drivers instead of 34**
 - Load `10375781` (Plattsburgh / Massena / Lake Placid NY, 574 mi, 15.5 h)
-  exceeds the 14 h duty limit on its own and cannot run in a single shift
+  exceeds the 14 h duty limit on its own, so it runs as a layover
 - Shortest load is `10375774` (Holyoke MA, 1 stop, 9 mi round trip, 2.2 h)
 
 Adding window enforcement will reduce the pair count. That's expected, not a

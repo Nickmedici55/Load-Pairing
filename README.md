@@ -14,24 +14,26 @@ $ loadpairing plan dispatch.xlsx --schedule
 
 Dispatch Order_3: 5 loads, 7 stops
 
-5 loads -> 2 drivers (2 pairs + 0 solo, 1 unschedulable)
-11.1 h of driver time if every schedulable load ran on its own; 6 feasible pairs found, matched by builtin
+5 loads -> 3 drivers (2 pairs + 0 solo + 1 layover)
+25.5 h of driver time if every schedulable load ran on its own; 6 feasible pairs found, matched by builtin
 limits: 14 h duty, 11 h drive; windows enforced; equipment may differ
-note: some lanes use estimated mileage (great-circle x 1.20), not a routing source
 
-Driver  1  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  05:10-12:01  6.8 h duty, 0.6 h drive, 1.3 h waiting
+Driver  1  10375781 (53RL, 2 stops, 572 mi, 14.4 h)  ->  00:00-00:27 +1d  14.4 h duty, 11.4 h drive  [layover: 2 shifts, 10 h rest; delivery times need a dispatcher]
+            10375781  05:21-06:21  Plattsburgh (Plattsburgh, NY 12901)  window 05:15-09:00
+            10375781  08:05-09:05  Massena (Massena, NY 13662)  window any
+Driver  2  10375778 (53LG, 2 stops, 26 mi, 3.5 h) + 10375775 (53RL, 1 stop, 2 mi, 2.0 h)  ->  05:10-12:01  6.8 h duty, 0.6 h drive, 1.3 h waiting
             10375778  06:15-07:15  Springfield (Springfield, MA 01109)  window 06:15-11:00
             10375778  07:30-08:30  Westfield (Westfield, MA 01085)  window any
             10375775  11:00-12:00  Chicopee St (Chicopee, MA 01013)  window 11:00-20:00
-Driver  2  10375774 (53LG, 1 stop, 9 mi, 2.2 h) + 10375790 (53PLG, 1 stop, 93 mi, 3.4 h)  ->  09:54-15:27  5.5 h duty, 2.0 h drive
+Driver  3  10375774 (53LG, 1 stop, 9 mi, 2.2 h) + 10375790 (53PLG, 1 stop, 93 mi, 3.4 h)  ->  09:54-15:27  5.5 h duty, 2.0 h drive
             10375774  11:00-12:00  Holyoke (Holyoke, MA 01040)  window 11:00-20:00
             10375790  14:01-14:31  Pittsfield DC (Pittsfield, MA 01201)  window 00:00-23:59 D&H
 ```
 
-Both drivers leave the DC on the clock of their first stop: 05:10 to be at
-Springfield as it opens at 06:15, 09:54 to be at Holyoke at 11:00. The
-Pittsfield stop is the drop and hook — due by 23:59, half an hour on the
-ground rather than the location's dwell.
+Drivers 2 and 3 leave the DC on the clock of their first stop — 05:10 to be at
+Springfield as it opens at 06:15. The Pittsfield stop is a drop and hook, due
+by 23:59 and half an hour on the ground. Driver 1's load is more work than one
+shift holds, so it runs as a layover rather than being dropped.
 
 ## Running it
 
@@ -140,6 +142,21 @@ most 11 h, every delivery window can still be met, and — if
 `--match-equipment` is set — both loads want the same trailer. Both running
 orders are tried and the better one is kept.
 
+## Layovers
+
+A load whose own duty or drive is over a single shift's limit is not
+impossible — the driver sleeps out and finishes the next day. Those loads run
+solo with a layover: the schedule drops in a 10 h rest wherever the next stop
+would break the driving or duty limit, and the rest is not counted as duty.
+They are never paired, being already more than a shift.
+
+**Delivery times are not checked across a layover.** The sheet gives an hour
+of the day, not a date, so once a trip runs past midnight there is no way to
+tell which day a stop is due on. Those loads come back with their stops laid
+out and their shift count, and the delivery times are a dispatcher's call.
+
+
+
 Feasible pairs are the edges of a graph and the plan is a maximum-cardinality,
 maximum-weight matching over it: fewest drivers first, then a tie-break that
 packs the fullest shifts together (`--objective wait` minimises idle time
@@ -225,7 +242,7 @@ different height.
 python -m unittest discover -s tests -t .
 ```
 
-115 tests, no dependencies, under a second. They cover the parser against
+118 tests, no dependencies, under a second. They cover the parser against
 generated workbooks that reproduce the sheet's quirks, the costing arithmetic,
 window feasibility, the lane cache and dwell-override rules, and the planner
 end to end through both the CLI and the WSGI app — including multipart

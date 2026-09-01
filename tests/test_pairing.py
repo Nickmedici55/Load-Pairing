@@ -116,16 +116,36 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(result.pairs), 3)
         self.assertEqual(len(result.solos), 0)
 
-    def test_a_load_too_long_for_one_shift_is_reported_not_dropped(self):
+    def test_a_load_too_long_for_one_shift_runs_with_a_layover(self):
         # 500 round-trip miles is 10 h driving, plus 4 h on the dock and 1 h
-        # loading: legal to drive, too long to run in one shift.
+        # loading: legal to drive, more than one shift holds.
         trips = [make_trip("L0", 50), make_trip("L1", 250, dwell=4.0)]
         result = plan(trips, NO_WINDOWS)
-        self.assertEqual([r.load_ids for r in result.unschedulable], [("L1",)])
-        self.assertIn("cannot run in a single shift", result.unschedulable[0].reason)
-        self.assertIn("15.0 h on duty", result.unschedulable[0].reason)
+
+        self.assertEqual(result.unschedulable, ())
+        self.assertEqual([a.load_ids for a in result.layovers], [("L1",)])
+        layover = result.layovers[0]
+        self.assertEqual(layover.shifts, 2)
+        self.assertAlmostEqual(layover.rest_hours, 10.0)
+        self.assertAlmostEqual(layover.duty_hours, 15.0)          # rest is not duty
+        self.assertAlmostEqual(layover.finish_hour - layover.start_hour, 25.0)
         self.assertEqual(result.load_count, 2)
-        self.assertEqual([a.load_ids for a in result.assignments], [("L0",)])
+        self.assertEqual(sorted(a.load_ids for a in result.assignments), [("L0",), ("L1",)])
+
+    def test_a_load_over_the_drive_limit_also_runs_with_a_layover(self):
+        # 12 h of driving cannot be done in one shift, but it can be done.
+        trips = [make_trip("L1", 300, dwell=0.5)]
+        result = plan(trips, NO_WINDOWS)
+        self.assertEqual(result.unschedulable, ())
+        self.assertEqual(result.drivers, 1)
+        self.assertTrue(result.assignments[0].is_layover)
+        self.assertGreaterEqual(result.assignments[0].shifts, 2)
+
+    def test_a_layover_load_is_never_paired(self):
+        trips = [make_trip("L0", 25), make_trip("L1", 300, dwell=0.5)]
+        result = plan(trips, NO_WINDOWS)
+        self.assertEqual(result.pairs, ())
+        self.assertEqual(result.drivers, 2)
 
     def test_an_odd_load_out_runs_solo(self):
         trips = [make_trip("L0", 50), make_trip("L1", 50), make_trip("L2", 50)]

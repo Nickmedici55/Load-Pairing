@@ -79,10 +79,16 @@ class Schedule:
     finish_hour: float = 0.0
     stops: tuple[ScheduledStop, ...] = ()
     reason: str = ""
+    rests: int = 0
+    rest_hours: float = 0.0
 
     @property
     def duty_hours(self) -> float:
-        return self.finish_hour - self.start_hour
+        return self.finish_hour - self.start_hour - self.rest_hours
+
+    @property
+    def shifts(self) -> int:
+        return self.rests + 1
 
 
 @dataclass(frozen=True)
@@ -223,6 +229,78 @@ def _walk(tasks: list[_Task], start: float, tail: float):
         )
         clock = depart
     return scheduled, clock + tail
+
+
+@dataclass(frozen=True)
+class ShiftLimits:
+    """What one shift holds, and how long the driver rests between them."""
+
+    max_duty: float = 14.0
+    max_drive: float = 11.0
+    rest_hours: float = 10.0
+
+
+def schedule_layover(trips, policy: WindowPolicy, limits: ShiftLimits = ShiftLimits()) -> Schedule:
+    """Lay a trip out across as many shifts as it takes.
+
+    A load whose own driving or duty is over a single shift's limit is not
+    impossible -- the driver sleeps out and finishes it the next day. This
+    walks the stops in order and drops in a rest break whenever the next one
+    would break the driving or the duty limit.
+
+    Delivery times are **not** checked here. The sheet gives an hour of the
+    day, not a date, so once a trip runs past midnight there is no way to know
+    which day a stop is due on. That call belongs to a dispatcher.
+    """
+    tasks, tail = flatten(trips, policy)
+    if not tasks:
+        return Schedule(feasible=False, reason="no delivery stops")
+
+    start = anchored_start(tasks)
+    if not math.isfinite(start) or start < policy.earliest_start:
+        start = max(policy.earliest_start, 0.0)
+
+    scheduled: list[ScheduledStop] = []
+    clock = shift_start = start
+    shift_drive = 0.0
+    rests = 0
+
+    def needs_rest(driving: float, until: float) -> bool:
+        return (
+            shift_drive + driving > limits.max_drive + 1e-9
+            or until - shift_start > limits.max_duty + 1e-9
+        )
+
+    for task in tasks:
+        if needs_rest(task.travel_in, clock + task.travel_in + task.dwell):
+            clock += limits.rest_hours
+            shift_start, shift_drive, rests = clock, 0.0, rests + 1
+        arrive = clock + task.travel_in
+        shift_drive += task.travel_in
+        depart = arrive + task.dwell
+        scheduled.append(
+            ScheduledStop(
+                load_id=task.load_id,
+                stop=task.stop,
+                arrive=arrive,
+                depart=depart,
+                dwell=task.dwell,
+            )
+        )
+        clock = depart
+
+    if needs_rest(tail, clock + tail):          # the run home needs a shift too
+        clock += limits.rest_hours
+        rests += 1
+
+    return Schedule(
+        feasible=True,
+        start_hour=start,
+        finish_hour=clock + tail,
+        stops=tuple(scheduled),
+        rests=rests,
+        rest_hours=rests * limits.rest_hours,
+    )
 
 
 def format_hour(hours: float) -> str:

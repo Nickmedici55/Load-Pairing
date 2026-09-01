@@ -159,6 +159,12 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
         )
     if not config.windows.enforce:
         warnings.append("Delivery windows were ignored for this run.")
+    if result.layovers:
+        warnings.append(
+            f"{len(result.layovers)} load(s) need a layover: more work than one shift holds, so the "
+            "driver sleeps out. Delivery times are not checked across the break -- the sheet gives "
+            "an hour of the day, not a date, so which day each stop is due on is a dispatcher's call."
+        )
 
     rows = "".join(
         f"<tr><td>{esc(', '.join(rejection.load_ids))}</td><td>{esc(rejection.reason)}</td></tr>"
@@ -175,7 +181,8 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
 <div class="stats">
   <div class="stat"><b>{result.drivers}</b><span>drivers</span></div>
   <div class="stat"><b>{len(result.pairs)}</b><span>pairs</span></div>
-  <div class="stat"><b>{len(result.solos)}</b><span>solo</span></div>
+  <div class="stat"><b>{len([a for a in result.solos if not a.is_layover])}</b><span>solo</span></div>
+  <div class="stat"><b>{len(result.layovers)}</b><span>layover</span></div>
   <div class="stat"><b>{len(result.unschedulable)}</b><span>unschedulable</span></div>
   <div class="stat"><b>{result.solo_hours:.1f}</b><span>driver hours if unpaired</span></div>
   <div class="stat"><b>{len(result.candidates)}</b><span>feasible pairs</span></div>
@@ -199,6 +206,12 @@ def _driver(index: int, assignment) -> str:
         for trip in assignment.trips
     )
     waiting = f", {assignment.wait_hours:.1f} h waiting" if assignment.wait_hours > 1e-6 else ""
+    layover = (
+        f'<span class="tag">layover: {assignment.shifts} shifts, '
+        f'{assignment.rest_hours:.0f} h rest</span>'
+        if assignment.is_layover
+        else ""
+    )
     stops = "".join(
         f"<tr><td>{esc(s.load_id)}</td>"
         f'<td class="num">{report.clock(s.arrive)} - {report.clock(s.depart)}</td>'
@@ -210,7 +223,7 @@ def _driver(index: int, assignment) -> str:
     return f"""<div class="driver"><div class="head">
 <span class="who">Driver {index}</span><span>{loads}</span>
 <span class="meta">{report.clock(assignment.start_hour)} - {report.clock(assignment.finish_hour)},
-{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>
+{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}
 </div><table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
 {stops}</table></div>"""
 
