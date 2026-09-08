@@ -237,21 +237,25 @@ def render_locations(store, message: str = "") -> str:
             if location.lat is not None and location.lon is not None
             else '<span class="note">missing</span>'
         )
+        # The DC itself is a location with no store number behind it.
+        store_numbers = esc(location.store) if location.store else "-"
         rows.append(
-            f"<tr><td class=\"num\">{esc(location.zip)}</td><td>{esc(where)}</td>"
+            f"<tr><td class=\"num\">{esc(location.zip)}</td>"
+            f'<td class="num">{store_numbers}</td><td>{esc(where)}</td>'
             f'<td><input class="num" type="number" step="0.25" min="0" max="12" '
             f'name="dwell:{esc(location.zip)}" value="{location.dwell_hours:.2f}"></td>'
             f'<td class="num">{coordinates}</td></tr>'
         )
-    body = "".join(rows) or '<tr><td colspan="4">No sheet has been uploaded yet.</td></tr>'
+    body = "".join(rows) or '<tr><td colspan="5">No sheet has been uploaded yet.</td></tr>'
 
     return f"""{message}
 <form class="card" method="post" action="/locations">
 <h2>Locations</h2>
 <p class="hint">Dwell is what the tool bills for time on the dock at each stop. A ZIP arrives here at
 1.0 h the first time it appears in an uploaded sheet; what you set below is kept and never
-overwritten by a later upload.</p>
-<table><tr><th>ZIP</th><th>Where</th><th>Dwell (h)</th><th>Coordinates</th></tr>{body}</table>
+overwritten by a later upload. Store is every store number an uploaded sheet has delivered
+to that ZIP; the DC itself has none.</p>
+<table><tr><th>ZIP</th><th>Store</th><th>Where</th><th>Dwell (h)</th><th>Coordinates</th></tr>{body}</table>
 <button type="submit">Save dwell</button>
 </form>
 <form class="card" method="post" action="/coordinates" enctype="multipart/form-data">
@@ -427,7 +431,7 @@ def _handle_plan(form: Form):
     store = db.connect()
     try:
         store.ensure_locations(
-            [db.Location(zip=stop.zip, city=stop.city, state=stop.state)
+            [db.Location(zip=stop.zip, city=stop.city, state=stop.state, store=stop.store)
              for load in parsed.loads for stop in load.stops]
             + [db.Location(zip=settings["dc_zip"])]
         )

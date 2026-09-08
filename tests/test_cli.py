@@ -180,6 +180,8 @@ class CliTest(unittest.TestCase):
         self.assertIn("12946", output)
         self.assertIn("Lake Placid", output)
         self.assertIn(" 1.00 h", output)
+        # The store delivered at that ZIP, which the city column does not give.
+        self.assertIn("Westfield DC", output)
 
     def test_ignoring_windows_is_available_and_reported(self):
         result = self.plan_json("--no-windows")

@@ -206,6 +206,9 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")
         self.assertIn("12946", html)
         self.assertIn('name="dwell:01040"', html)
+        self.assertIn("<th>Store</th>", html)
+        # The store delivered at that ZIP, which the city column does not give.
+        self.assertIn("Westfield DC", html)
 
     def test_a_saved_dwell_holds_and_changes_the_next_plan(self):
         self.prime_coordinates()

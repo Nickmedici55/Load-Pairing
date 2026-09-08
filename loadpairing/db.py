@@ -3,9 +3,10 @@
 Postgres is the target; SQLite is supported so the tool runs on a laptop with
 nothing installed. Both back ends carry the same two tables:
 
-* ``location`` -- one row per ZIP, holding the dispatcher-owned dwell override.
-  A ZIP is inserted at the 1.0 h default the first time it appears in any
-  uploaded sheet, and from then on the tool reads whatever has been set.
+* ``location`` -- one row per ZIP, holding the dispatcher-owned dwell override
+  and the store numbers delivered there. A ZIP is inserted at the 1.0 h default
+  the first time it appears in any uploaded sheet, and from then on the tool
+  reads whatever has been set.
 * ``lane`` -- mileage between two ZIPs, cached permanently on first fetch.
   ``source = 'estimated'`` marks a row that came from the offline fallback
   rather than a routing API, so those can be backfilled later without touching
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS location (
     zip          TEXT PRIMARY KEY,
     city         TEXT,
     state        TEXT,
+    store        TEXT,
     lat          DOUBLE PRECISION,
     lon          DOUBLE PRECISION,
     dwell_hours  NUMERIC(4,2) NOT NULL DEFAULT 1.0,
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS location (
     zip          TEXT PRIMARY KEY,
     city         TEXT,
     state        TEXT,
+    store        TEXT,
     lat          REAL,
     lon          REAL,
     dwell_hours  REAL NOT NULL DEFAULT 1.0,
@@ -64,11 +67,17 @@ CREATE TABLE IF NOT EXISTS lane (
 """
 
 
+#: Separator between the store numbers recorded against one ZIP. A ZIP nearly
+#: always serves a single store, but nothing in the sheet guarantees it.
+STORE_SEPARATOR = ", "
+
+
 @dataclass(frozen=True)
 class Location:
     zip: str
     city: str = ""
     state: str = ""
+    store: str = ""
     lat: Optional[float] = None
     lon: Optional[float] = None
     dwell_hours: float = DEFAULT_DWELL_HOURS
@@ -91,6 +100,10 @@ class Store:
     placeholder = "?"
     ddl = SQLITE_DDL
 
+    #: Columns added after the first release, applied to databases that predate
+    #: them as ``(table, column, definition)``.
+    added_columns: tuple[tuple[str, str, str], ...] = ()
+
     def __init__(self, connection):
         self.connection = connection
 
@@ -101,7 +114,17 @@ class Store:
         for statement in self.ddl.strip().split(";"):
             if statement.strip():
                 cursor.execute(statement)
+        self._migrate(cursor)
         self.connection.commit()
+
+    def _migrate(self, cursor) -> None:
+        """Bring a database created before a column existed up to date."""
+        for table, column, definition in self.added_columns:
+            if column not in self._columns(table):
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _columns(self, table: str) -> set[str]:
+        raise NotImplementedError
 
     def close(self) -> None:
         self.connection.close()
@@ -119,37 +142,53 @@ class Store:
     def ensure_locations(self, locations: Iterable[Location]) -> int:
         """Insert any ZIP not seen before at the default dwell.
 
-        Existing rows are left alone: the dwell there belongs to the
-        dispatcher, and city/state already recorded are not overwritten by a
-        later sheet.
+        Existing rows keep their dwell -- that belongs to the dispatcher -- and
+        the city/state already recorded. A store number the sheet delivers to a
+        ZIP already on file is added to that row, so a second store behind one
+        ZIP shows up rather than being lost.
+
+        Returns the number of ZIPs inserted.
         """
         inserted = 0
-        for location in locations:
+        for location in _merged_by_zip(locations):
             cursor = self._execute(
-                "INSERT INTO location (zip, city, state, lat, lon, dwell_hours) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (zip) DO NOTHING",
+                "INSERT INTO location (zip, city, state, store, lat, lon, dwell_hours) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (zip) DO NOTHING",
                 (
                     location.zip,
                     location.city,
                     location.state,
+                    location.store,
                     location.lat,
                     location.lon,
                     float(location.dwell_hours),
                 ),
             )
-            inserted += max(0, cursor.rowcount)
+            if cursor.rowcount > 0:
+                inserted += cursor.rowcount
+            elif location.store:
+                self._add_stores(location.zip, location.store)
         self.connection.commit()
         return inserted
 
+    def _add_stores(self, zip_code: str, stores: str) -> None:
+        """Record store numbers not yet on an existing row."""
+        existing = self.location(zip_code)
+        merged = _join_stores(
+            _split_stores(existing.store if existing else "") + _split_stores(stores)
+        )
+        if existing is not None and merged != existing.store:
+            self._execute("UPDATE location SET store = ? WHERE zip = ?", (merged, zip_code))
+
     def locations(self) -> list[Location]:
         cursor = self._execute(
-            "SELECT zip, city, state, lat, lon, dwell_hours FROM location ORDER BY zip"
+            "SELECT zip, city, state, store, lat, lon, dwell_hours FROM location ORDER BY zip"
         )
         return [_as_location(row) for row in cursor.fetchall()]
 
     def location(self, zip_code: str) -> Optional[Location]:
         cursor = self._execute(
-            "SELECT zip, city, state, lat, lon, dwell_hours FROM location WHERE zip = ?",
+            "SELECT zip, city, state, store, lat, lon, dwell_hours FROM location WHERE zip = ?",
             (zip_code,),
         )
         row = cursor.fetchone()
@@ -207,11 +246,26 @@ class Store:
 class SqliteStore(Store):
     placeholder = "?"
     ddl = SQLITE_DDL
+    added_columns = (("location", "store", "TEXT"),)
+
+    def _columns(self, table: str) -> set[str]:
+        cursor = self.connection.cursor()
+        cursor.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in cursor.fetchall()}
 
 
 class PostgresStore(Store):
     placeholder = "%s"
     ddl = POSTGRES_DDL
+    added_columns = (("location", "store", "TEXT"),)
+
+    def _columns(self, table: str) -> set[str]:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+            (table,),
+        )
+        return {row[0] for row in cursor.fetchall()}
 
 
 def _as_location(row) -> Location:
@@ -219,10 +273,51 @@ def _as_location(row) -> Location:
         zip=row[0],
         city=row[1] or "",
         state=row[2] or "",
-        lat=float(row[3]) if row[3] is not None else None,
-        lon=float(row[4]) if row[4] is not None else None,
-        dwell_hours=float(row[5]),
+        store=row[3] or "",
+        lat=float(row[4]) if row[4] is not None else None,
+        lon=float(row[5]) if row[5] is not None else None,
+        dwell_hours=float(row[6]),
     )
+
+
+def _split_stores(stores: str) -> list[str]:
+    return [part.strip() for part in stores.split(",") if part.strip()]
+
+
+def _join_stores(stores: Iterable[str]) -> str:
+    """One entry per store number, in the order first seen."""
+    seen: dict[str, None] = {}
+    for store in stores:
+        seen.setdefault(store, None)
+    return STORE_SEPARATOR.join(seen)
+
+
+def _merged_by_zip(locations: Iterable[Location]) -> list[Location]:
+    """Collapse one sheet's stops to a row per ZIP, keeping every store."""
+    merged: dict[str, Location] = {}
+    for location in locations:
+        seen = merged.get(location.zip)
+        if seen is None:
+            merged[location.zip] = Location(
+                zip=location.zip,
+                city=location.city,
+                state=location.state,
+                store=_join_stores(_split_stores(location.store)),
+                lat=location.lat,
+                lon=location.lon,
+                dwell_hours=location.dwell_hours,
+            )
+            continue
+        merged[location.zip] = Location(
+            zip=seen.zip,
+            city=seen.city or location.city,
+            state=seen.state or location.state,
+            store=_join_stores(_split_stores(seen.store) + _split_stores(location.store)),
+            lat=seen.lat if seen.lat is not None else location.lat,
+            lon=seen.lon if seen.lon is not None else location.lon,
+            dwell_hours=seen.dwell_hours,
+        )
+    return list(merged.values())
 
 
 def connect(url: str | None = None) -> Store:

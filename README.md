@@ -60,7 +60,7 @@ Three optional extras change how it runs, not what it does:
 loadpairing serve                               the web front end, on localhost:8000
 loadpairing sheets BOOK.xlsx                    list the tabs
 loadpairing plan BOOK.xlsx [options]            build the driver plan
-loadpairing locations list                      every ZIP seen, with its dwell
+loadpairing locations list                      every ZIP seen, with its store and dwell
 loadpairing locations dwell 01040 1.75          override one location's dwell
 loadpairing locations coords --csv centroids.csv   fill in ZIP coordinates
 loadpairing lanes list | lanes estimated        inspect the mileage cache
@@ -86,9 +86,10 @@ imply:
 
 * **/** — upload a workbook, pick the tab, carrier, DC ZIP and limits, get the
   driver plan with every stop on the clock.
-* **/locations** — every ZIP any sheet has mentioned, with its dwell in an
-  editable field. This is where the data quality accrues. Also takes a
-  `zip,lat,lon` CSV for the offline mileage estimate.
+* **/locations** — every ZIP any sheet has mentioned, with the store numbers
+  delivered there and its dwell in an editable field. This is where the data
+  quality accrues. Also takes a `zip,lat,lon` CSV for the offline mileage
+  estimate.
 * **/lanes** — the mileage cache, with the estimated rows called out.
 * **/healthz** — plain `ok`, for a platform health check.
 

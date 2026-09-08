@@ -121,7 +121,7 @@ def _plan(args) -> int:
     store = db.connect(args.db)
     store.ensure_locations(
         [
-            db.Location(zip=stop.zip, city=stop.city, state=stop.state)
+            db.Location(zip=stop.zip, city=stop.city, state=stop.state, store=stop.store)
             for load in parsed.loads
             for stop in load.stops
         ]
@@ -183,7 +183,11 @@ def _locations(args) -> int:
                 else "no coords"
             )
             where = ", ".join(p for p in (location.city, location.state) if p) or "-"
-            print(f"{location.zip}  {location.dwell_hours:>5.2f} h  {where:<28} {coords}")
+            store_numbers = location.store or "-"      # the DC has no store behind it
+            print(
+                f"{location.zip}  {store_numbers:<12} {location.dwell_hours:>5.2f} h  "
+                f"{where:<28} {coords}"
+            )
     elif args.action == "dwell":
         if store.set_dwell(args.zip, args.hours):
             print(f"{args.zip} dwell set to {args.hours:g} h")

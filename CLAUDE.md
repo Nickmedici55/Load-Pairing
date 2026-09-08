@@ -39,6 +39,11 @@ the 1.0 h default the first time its ZIP appears in any uploaded sheet. From
 then on the app reads whatever the dispatcher has set. Data quality improves
 with use.
 
+`location.store` carries the store numbers an uploaded sheet has delivered to
+that ZIP, so a dispatcher setting a dwell is looking at the store rather than
+at five digits. A ZIP nearly always serves one store; when a sheet shows a
+second, it is appended rather than replacing the first. The DC has none.
+
 ### Pairing constraints
 
 - Combined duty time ≤ 14 h
@@ -59,6 +64,7 @@ CREATE TABLE location (
     zip          TEXT PRIMARY KEY,
     city         TEXT,
     state        TEXT,
+    store        TEXT,
     lat          DOUBLE PRECISION,
     lon          DOUBLE PRECISION,
     dwell_hours  NUMERIC(4,2) NOT NULL DEFAULT 1.0,

@@ -8,11 +8,20 @@ CREATE TABLE IF NOT EXISTS location (
     zip          TEXT PRIMARY KEY,
     city         TEXT,
     state        TEXT,
+    store        TEXT,
     lat          DOUBLE PRECISION,
     lon          DOUBLE PRECISION,
     dwell_hours  NUMERIC(4,2) NOT NULL DEFAULT 1.0,
     first_seen   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+
+-- Databases created before the store number was recorded.
+ALTER TABLE location ADD COLUMN IF NOT EXISTS store TEXT;
+
+COMMENT ON COLUMN location.store IS
+    'Every store number an uploaded sheet has delivered to this ZIP, comma '
+    'separated. A ZIP nearly always serves one store; nothing in the sheet '
+    'guarantees it, so a second is appended rather than replacing the first.';
 
 COMMENT ON COLUMN location.dwell_hours IS
     'Hours on the dock at this location. Inserted at the 1.0 h default the '

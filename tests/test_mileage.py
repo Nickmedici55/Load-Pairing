@@ -24,8 +24,8 @@ class MileageServiceTest(unittest.TestCase):
         self.store = connect(":memory:")
         self.store.ensure_locations(
             [
-                Location("01020", "Chicopee", "MA", 42.1487, -72.6079),
-                Location("01040", "Holyoke", "MA", 42.2043, -72.6162),
+                Location("01020", "Chicopee", "MA", lat=42.1487, lon=-72.6079),
+                Location("01040", "Holyoke", "MA", lat=42.2043, lon=-72.6162),
             ]
         )
 
