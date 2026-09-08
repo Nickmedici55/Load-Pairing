@@ -57,8 +57,9 @@ LOADS = [
 
 
 def run(*argv):
+    """Run the CLI, returning its exit code and everything it printed."""
     out = io.StringIO()
-    with contextlib.redirect_stdout(out):
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         code = main(list(argv))
     return code, out.getvalue()
 
@@ -180,6 +181,56 @@ class CliTest(unittest.TestCase):
         self.assertIn("12946", output)
         self.assertIn("Lake Placid", output)
         self.assertIn(" 1.00 h", output)
+        # The store delivered at that ZIP, which the city column does not give.
+        self.assertIn("Westfield DC", output)
+
+    def test_service_centers_are_listed_and_can_be_added(self):
+        code, output = run("--db", self.db, "service-centers", "list")
+        self.assertEqual(code, 0)
+        self.assertIn("01020", output)
+
+        code, output = run(
+            "--db", self.db, "service-centers", "add", "06103", "Hartford SC",
+            "--city", "Hartford", "--state", "CT",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("06103 added", output)
+
+        _code, listed = run("--db", self.db, "service-centers", "list")
+        self.assertIn("Hartford SC", listed)
+
+    def test_a_sheet_cannot_be_planned_against_an_unknown_service_center(self):
+        code, output = run(
+            "--db", self.db, "plan", self.sheet, "--service-center", "99999",
+            "--router", "estimated",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("is not a service center", output)
+
+    def test_locations_can_be_listed_for_one_service_center(self):
+        self.plan_json()
+        run("--db", self.db, "service-centers", "add", "06103", "Hartford SC")
+
+        code, output = run("--db", self.db, "locations", "list", "--service-center", "06103")
+        self.assertEqual(code, 0)
+        self.assertNotIn("12946", output)
+
+        _code, chicopee = run("--db", self.db, "locations", "list", "--service-center", "01020")
+        self.assertIn("12946", chicopee)
+
+    def test_a_dwell_belongs_to_one_service_center(self):
+        self.plan_json()
+        run("--db", self.db, "service-centers", "add", "06103", "Hartford SC")
+
+        code, output = run(
+            "--db", self.db, "locations", "dwell", "01040", "3.5", "--service-center", "06103"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("not a known location at service center 06103", output)
+
+        code, output = run("--db", self.db, "locations", "dwell", "01040", "3.5")
+        self.assertEqual(code, 0)
+        self.assertIn("dwell set to 3.5 h at 01020", output)
 
     def test_ignoring_windows_is_available_and_reported(self):
         result = self.plan_json("--no-windows")

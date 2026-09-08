@@ -31,7 +31,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"only loads for this carrier ID (default {DEFAULT_CARRIER_ID}; pass '' for every carrier)",
     )
     plan_parser.add_argument("--header-row", type=int, default=6, help="zero-based header row (default 6)")
-    plan_parser.add_argument("--dc-zip", default=DEFAULT_DC_ZIP, help=f"DC ZIP (default {DEFAULT_DC_ZIP})")
+    plan_parser.add_argument(
+        "--service-center",
+        "--dc-zip",
+        dest="dc_zip",
+        default=DEFAULT_DC_ZIP,
+        help=f"ZIP of the service center the sheet runs from (default {DEFAULT_DC_ZIP})",
+    )
     plan_parser.add_argument(
         "--router",
         default="auto",
@@ -68,12 +74,31 @@ def build_parser() -> argparse.ArgumentParser:
     sheets_parser = subparsers.add_parser("sheets", help="list the tabs in a workbook")
     sheets_parser.add_argument("sheet")
 
+    centers_parser = subparsers.add_parser(
+        "service-centers", help="the pickup locations a sheet can be uploaded against"
+    )
+    center_subparsers = centers_parser.add_subparsers(dest="action", required=True)
+    center_subparsers.add_parser("list", help="list known service centers")
+    add_center = center_subparsers.add_parser("add", help="add or rename a service center")
+    add_center.add_argument("zip", help="the service center's ZIP; this identifies it")
+    add_center.add_argument("name", help="what dispatchers call it, e.g. 'New England SC'")
+    add_center.add_argument("--city", default="")
+    add_center.add_argument("--state", default="")
+
     locations_parser = subparsers.add_parser("locations", help="inspect and edit per-location dwell")
     location_subparsers = locations_parser.add_subparsers(dest="action", required=True)
-    location_subparsers.add_parser("list", help="list known locations")
+    list_locations = location_subparsers.add_parser("list", help="list known locations")
+    list_locations.add_argument(
+        "--service-center", help="only this service center's locations (default: all of them)"
+    )
     dwell_parser = location_subparsers.add_parser("dwell", help="set the dwell for one ZIP")
     dwell_parser.add_argument("zip")
     dwell_parser.add_argument("hours", type=float)
+    dwell_parser.add_argument(
+        "--service-center",
+        default=DEFAULT_DC_ZIP,
+        help=f"which service center's dwell to set (default {DEFAULT_DC_ZIP})",
+    )
     coords_parser = location_subparsers.add_parser("coords", help="fill in missing coordinates")
     coords_parser.add_argument("--csv", help="CSV of zip,lat,lon")
 
@@ -99,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             for index, name in enumerate(sheet_names(args.sheet), start=1):
                 print(f"{index}. {name}")
             return 0
+        if args.command == "service-centers":
+            return _service_centers(args)
         if args.command == "locations":
             return _locations(args)
         if args.command == "lanes":
@@ -119,13 +146,30 @@ def _plan(args) -> int:
         return 1
 
     store = db.connect(args.db)
+    center = store.service_center(args.dc_zip)
+    if center is None:
+        known = ", ".join(sc.zip for sc in store.service_centers()) or "none yet"
+        print(
+            f"error: {args.dc_zip} is not a service center (known: {known}). "
+            f"Add it with: loadpairing service-centers add {args.dc_zip} NAME",
+            file=sys.stderr,
+        )
+        store.close()
+        return 1
+
     store.ensure_locations(
         [
-            db.Location(zip=stop.zip, city=stop.city, state=stop.state)
+            db.Location(
+                zip=stop.zip,
+                city=stop.city,
+                state=stop.state,
+                store=stop.store,
+                service_center=center.zip,
+            )
             for load in parsed.loads
             for stop in load.stops
         ]
-        + [db.Location(zip=args.dc_zip)]
+        + [db.Location(zip=center.zip, city=center.city, state=center.state, service_center=center.zip)]
     )
 
     router = router_from_env(args.router)
@@ -135,7 +179,7 @@ def _plan(args) -> int:
 
     mileage = MileageService(store, router)
     mileage.refresh()
-    dwell = store.dwell_hours()
+    dwell = store.dwell_hours(center.zip)
 
     config = PairingConfig(
         dc_zip=args.dc_zip,
@@ -173,22 +217,44 @@ def _plan(args) -> int:
     return 0
 
 
+def _service_centers(args) -> int:
+    store = db.connect(args.db)
+    if args.action == "list":
+        for center in store.service_centers():
+            print(f"{center.zip}  {center.name:<24} {center.where}")
+    elif args.action == "add":
+        added = store.save_service_center(
+            db.ServiceCenter(zip=args.zip, name=args.name, city=args.city, state=args.state)
+        )
+        print(f"{args.zip} {'added' if added else 'updated'}")
+    store.close()
+    return 0
+
+
 def _locations(args) -> int:
     store = db.connect(args.db)
     if args.action == "list":
-        for location in store.locations():
+        for location in store.locations(args.service_center):
             coords = (
                 f"{location.lat:.4f},{location.lon:.4f}"
                 if location.lat is not None and location.lon is not None
                 else "no coords"
             )
             where = ", ".join(p for p in (location.city, location.state) if p) or "-"
-            print(f"{location.zip}  {location.dwell_hours:>5.2f} h  {where:<28} {coords}")
+            store_numbers = location.store or "-"      # the DC has no store behind it
+            print(
+                f"{location.service_center}  {location.zip}  {store_numbers:<12} "
+                f"{location.dwell_hours:>5.2f} h  {where:<28} {coords}"
+            )
     elif args.action == "dwell":
-        if store.set_dwell(args.zip, args.hours):
-            print(f"{args.zip} dwell set to {args.hours:g} h")
+        if store.set_dwell(args.zip, args.hours, args.service_center):
+            print(f"{args.zip} dwell set to {args.hours:g} h at {args.service_center}")
         else:
-            print(f"error: {args.zip} is not a known location", file=sys.stderr)
+            print(
+                f"error: {args.zip} is not a known location at service center "
+                f"{args.service_center}",
+                file=sys.stderr,
+            )
             return 1
     elif args.action == "coords":
         centroids = geocode.read_centroids(args.csv) if args.csv else None

@@ -9,9 +9,16 @@ Origin sheet: `NESC08_28.xlsx` — New England SC, Chicopee MA. Tab 3
 
 ## Domain model
 
-Every load is a **round trip**: depart Chicopee loaded, hit every delivery stop
-in the sheet, return to Chicopee empty. The stops in the sheet are deliveries
-only — the origin is implicit and is always the DC.
+Every load is a **round trip**: depart the service center loaded, hit every
+delivery stop in the sheet, return empty. The stops in the sheet are deliveries
+only — the origin is implicit and is always the service center the sheet was
+uploaded against.
+
+A **service center** is a pickup location, identified by its ZIP. Every sheet is
+uploaded against one, and the stores it delivers to are recorded under it, so
+two service centers delivering to the same ZIP never share a dwell. `01020`
+(New England SC, Chicopee MA) is seeded into an empty database, and is what a
+database predating service centers adopts its locations into.
 
 **"Pairing" means two sequential round trips on one driver**, not two loads on
 one trailer. Every load in the sample runs 21–28 pallets, which fills a 53'
@@ -39,6 +46,17 @@ the 1.0 h default the first time its ZIP appears in any uploaded sheet. From
 then on the app reads whatever the dispatcher has set. Data quality improves
 with use.
 
+`location.store` carries the store numbers an uploaded sheet has delivered to
+that ZIP, so a dispatcher setting a dwell is looking at the store rather than
+at five digits. A ZIP nearly always serves one store; when a sheet shows a
+second, it is appended rather than replacing the first. The service center's own
+ZIP is a location too, and has none.
+
+Locations are keyed by `(service_center, zip)`: a dwell set for one service
+center is invisible to another. Lanes are not scoped -- miles between two ZIPs
+are the same whoever is driving them -- and neither are coordinates, which are
+a fact about the ZIP.
+
 ### Pairing constraints
 
 - Combined duty time ≤ 14 h
@@ -55,14 +73,25 @@ feasible pairs. `networkx.max_weight_matching(G, maxcardinality=True)`.
 ## Schema (Postgres)
 
 ```sql
+CREATE TABLE service_center (
+    zip         TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    city        TEXT,
+    state       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE location (
-    zip          TEXT PRIMARY KEY,
+    service_center TEXT NOT NULL,
+    zip          TEXT NOT NULL,
     city         TEXT,
     state        TEXT,
+    store        TEXT,
     lat          DOUBLE PRECISION,
     lon          DOUBLE PRECISION,
     dwell_hours  NUMERIC(4,2) NOT NULL DEFAULT 1.0,
-    first_seen   TIMESTAMPTZ  NOT NULL DEFAULT now()
+    first_seen   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    PRIMARY KEY (service_center, zip)
 );
 
 CREATE TABLE lane (
