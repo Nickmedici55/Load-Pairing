@@ -18,13 +18,14 @@ import os
 import shutil
 import tempfile
 import traceback
+from urllib.parse import parse_qs
 
 from . import db, geocode, report
 from .costing import DEFAULT_DWELL_HOURS
 from .formdata import Form, FormError, read_form
 from .mileage import ESTIMATED, MileageService, RoutingError, router_from_env
 from .pairing import OBJECTIVE_DUTY, OBJECTIVE_WAIT, PairingConfig, build_trips, plan
-from .parsing import DEFAULT_CARRIER_ID, ParseError, parse_workbook
+from .parsing import DEFAULT_CARRIER_ID, ParseError, normalize_zip, parse_workbook
 from .windows import WindowPolicy
 from .xlsx import XlsxError, sheet_names
 
@@ -87,7 +88,8 @@ def page(title: str, body: str) -> bytes:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - Load Pairing</title><style>{STYLE}</style></head>
 <body><header><h1>Load Pairing</h1><nav>
-<a href="/">Plan a sheet</a><a href="/locations">Locations</a><a href="/lanes">Lanes</a>
+<a href="/">Plan a sheet</a><a href="/service-centers">Service centers</a>
+<a href="/locations">Locations</a><a href="/lanes">Lanes</a>
 </nav></header><main>{body}</main></body></html>""".encode("utf-8")
 
 
@@ -95,7 +97,7 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
-def plan_form(defaults: dict, message: str = "") -> str:
+def plan_form(defaults: dict, centers: list, message: str = "") -> str:
     def value(name, fallback=""):
         return esc(defaults.get(name, fallback))
 
@@ -120,8 +122,9 @@ def plan_form(defaults: dict, message: str = "") -> str:
   <div><label for="carrier">Carrier ID</label>
        <input id="carrier" type="text" name="carrier" value="{value('carrier', DEFAULT_CARRIER_ID)}"
               placeholder="blank for every carrier"></div>
-  <div><label for="dc_zip">DC ZIP</label>
-       <input id="dc_zip" type="text" name="dc_zip" value="{value('dc_zip', DEFAULT_DC_ZIP)}"></div>
+  <div><label for="dc_zip">Service center</label>
+       <select id="dc_zip" name="dc_zip">{options('dc_zip',
+         [(c.zip, c.label) for c in centers], defaults.get('dc_zip', DEFAULT_DC_ZIP))}</select></div>
   <div><label for="earliest_start">No dispatch before</label>
        <input id="earliest_start" type="number" step="0.25" min="0" max="24" name="earliest_start"
               value="{value('earliest_start', '0')}" title="0 lets the delivery times decide"></div>
@@ -149,7 +152,8 @@ then on.</p>
 </form>"""
 
 
-def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetched: int, router_name: str) -> str:
+def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetched: int,
+                router_name: str, center=None) -> str:
     config = result.config
     warnings = []
     if result.estimated_mileage:
@@ -178,6 +182,7 @@ def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetch
 
     return f"""<div class="card">
 <h2>{esc(sheet_name)} - {load_count} loads, {stop_count} stops</h2>
+<p class="hint">Out of {esc(center.label if center else config.dc_zip)}.</p>
 <div class="stats">
   <div class="stat"><b>{result.drivers}</b><span>drivers</span></div>
   <div class="stat"><b>{len(result.pairs)}</b><span>pairs</span></div>
@@ -228,16 +233,66 @@ def _driver(index: int, assignment) -> str:
 {stops}</table></div>"""
 
 
-def render_locations(store, message: str = "") -> str:
-    rows = []
+def render_service_centers(store, message: str = "") -> str:
+    centers = store.service_centers()
+    counts = {}
     for location in store.locations():
+        counts[location.service_center] = counts.get(location.service_center, 0) + 1
+
+    rows = "".join(
+        f'<tr><td class="num">{esc(center.zip)}</td><td>{esc(center.name)}</td>'
+        f'<td>{esc(center.where or "-")}</td>'
+        f'<td class="num">{counts.get(center.zip, 0)}</td>'
+        f'<td><a href="/locations?sc={esc(center.zip)}">locations</a></td></tr>'
+        for center in centers
+    ) or '<tr><td colspan="5">No service centers yet.</td></tr>'
+
+    return f"""{message}
+<div class="card"><h2>Service centers</h2>
+<p class="hint">A service center is a pickup location: drivers load there and return there. Every
+sheet is uploaded against one, and the stores it delivers to are kept under that service center,
+so two service centers delivering to the same ZIP never share a dwell.</p>
+<table><tr><th>ZIP</th><th>Name</th><th>Where</th><th>Locations</th><th></th></tr>{rows}</table>
+</div>
+<form class="card" method="post" action="/service-centers">
+<h2>Add a service center</h2>
+<div class="grid">
+  <div><label for="sc_zip">ZIP</label>
+       <input id="sc_zip" type="text" name="zip" required placeholder="01020"></div>
+  <div><label for="sc_name">Name</label>
+       <input id="sc_name" type="text" name="name" required placeholder="New England SC"></div>
+  <div><label for="sc_city">City</label>
+       <input id="sc_city" type="text" name="city" placeholder="Chicopee"></div>
+  <div><label for="sc_state">State</label>
+       <input id="sc_state" type="text" name="state" placeholder="MA"></div>
+</div>
+<p class="hint">The ZIP identifies the service center and is where every round trip starts and
+ends. Saving an existing ZIP renames it and keeps its locations.</p>
+<button type="submit">Save service center</button>
+</form>"""
+
+
+def render_locations(store, selected: str = "", message: str = "") -> str:
+    centers = store.service_centers()
+    if not centers:
+        return f"""{message}<div class="card"><h2>Locations</h2>
+<p class="note">Add a <a href="/service-centers">service center</a> first: locations are kept
+under the service center that delivers to them.</p></div>"""
+
+    known = {center.zip for center in centers}
+    if selected not in known:
+        selected = DEFAULT_DC_ZIP if DEFAULT_DC_ZIP in known else centers[0].zip
+    chosen = store.service_center(selected)
+
+    rows = []
+    for location in store.locations(selected):
         where = ", ".join(part for part in (location.city, location.state) if part) or "-"
         coordinates = (
             f"{location.lat:.4f}, {location.lon:.4f}"
             if location.lat is not None and location.lon is not None
             else '<span class="note">missing</span>'
         )
-        # The DC itself is a location with no store number behind it.
+        # The service center's own ZIP is a location with no store behind it.
         store_numbers = esc(location.store) if location.store else "-"
         rows.append(
             f"<tr><td class=\"num\">{esc(location.zip)}</td>"
@@ -246,23 +301,39 @@ def render_locations(store, message: str = "") -> str:
             f'name="dwell:{esc(location.zip)}" value="{location.dwell_hours:.2f}"></td>'
             f'<td class="num">{coordinates}</td></tr>'
         )
-    body = "".join(rows) or '<tr><td colspan="5">No sheet has been uploaded yet.</td></tr>'
+    body = "".join(rows) or (
+        f'<tr><td colspan="5">No sheet has been uploaded for {esc(chosen.name or selected)} yet.</td></tr>'
+    )
+    choices = "".join(
+        f'<option value="{esc(center.zip)}"{" selected" if center.zip == selected else ""}>'
+        f"{esc(center.label)}</option>"
+        for center in centers
+    )
 
     return f"""{message}
+<form class="card" method="get" action="/locations">
+<h2>Service center</h2>
+<div class="grid"><div><label for="sc">Show the locations of</label>
+<select id="sc" name="sc">{choices}</select></div></div>
+<button type="submit">Show</button>
+</form>
 <form class="card" method="post" action="/locations">
-<h2>Locations</h2>
+<input type="hidden" name="service_center" value="{esc(selected)}">
+<h2>Locations - {esc(chosen.name or selected)}</h2>
 <p class="hint">Dwell is what the tool bills for time on the dock at each stop. A ZIP arrives here at
-1.0 h the first time it appears in an uploaded sheet; what you set below is kept and never
-overwritten by a later upload. Store is every store number an uploaded sheet has delivered
-to that ZIP; the DC itself has none.</p>
+1.0 h the first time it appears in a sheet uploaded for this service center; what you set below is
+kept and never overwritten by a later upload, and belongs to this service center alone. Store is
+every store number a sheet has delivered to that ZIP from here.</p>
 <table><tr><th>ZIP</th><th>Store</th><th>Where</th><th>Dwell (h)</th><th>Coordinates</th></tr>{body}</table>
 <button type="submit">Save dwell</button>
 </form>
 <form class="card" method="post" action="/coordinates" enctype="multipart/form-data">
+<input type="hidden" name="service_center" value="{esc(selected)}">
 <h2>Coordinates</h2>
 <p class="hint">Only the offline mileage estimate needs these. A routing API key
 (PC*Miler, Google or HERE) makes them unnecessary. Upload a CSV of
-<code>zip,lat,lon</code>, or submit with no file to try pgeocode if it is installed.</p>
+<code>zip,lat,lon</code>, or submit with no file to try pgeocode if it is installed.
+Coordinates belong to the ZIP, so filling them in serves every service center.</p>
 <input type="file" name="centroids" accept=".csv">
 <button type="submit">Fill in coordinates</button>
 </form>"""
@@ -347,21 +418,35 @@ def application(environ, start_response):
 
 def _route(path: str, method: str, environ):
     if path == "/" and method == "GET":
-        return "200 OK", page("Plan", plan_form({}))
+        return _with_store(lambda store: page("Plan", plan_form({}, store.service_centers())))
     if path == "/plan" and method == "POST":
         return _handle_plan(read_form(environ))
+    if path == "/service-centers":
+        if method == "GET":
+            return _with_store(lambda store: page("Service centers", render_service_centers(store)))
+        if method == "POST":
+            return _handle_service_center(read_form(environ))
     if path == "/locations":
         if method == "GET":
-            return _with_store(lambda store: page("Locations", render_locations(store)))
+            selected = _query(environ).get("sc", "")
+            return _with_store(
+                lambda store: page("Locations", render_locations(store, selected))
+            )
         if method == "POST":
             return _handle_dwell(read_form(environ))
     if path == "/coordinates" and method == "POST":
         return _handle_coordinates(read_form(environ))
     if path == "/lanes" and method == "GET":
         return _with_store(lambda store: page("Lanes", render_lanes(store)))
-    if path in ("/", "/plan", "/locations", "/lanes", "/coordinates"):
+    if path in ("/", "/plan", "/service-centers", "/locations", "/lanes", "/coordinates"):
         return "405 Method Not Allowed", page("Not allowed", _message("That method is not allowed here.", "error"))
     return "404 Not Found", page("Not found", _message("No such page.", "error"))
+
+
+def _query(environ) -> dict[str, str]:
+    """The query string, first value wins."""
+    parsed = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
+    return {name: values[0] for name, values in parsed.items() if values}
 
 
 def _with_store(render):
@@ -397,10 +482,26 @@ def _settings(form: Form) -> dict:
 
 def _handle_plan(form: Form):
     settings = _settings(form)
+    centers = _service_centers()
+    if not any(center.zip == settings["dc_zip"] for center in centers):
+        return "400 Bad Request", page(
+            "Plan",
+            plan_form(
+                settings,
+                centers,
+                _message(
+                    f"{settings['dc_zip']} is not a service center. Add it on the "
+                    "Service centers page, then upload the sheet against it.",
+                    "error",
+                ),
+            ),
+        )
+
     upload = form.file("sheet")
     if upload is None:
         return "400 Bad Request", page(
-            "Plan", plan_form(settings, _message("Choose a dispatch workbook to upload.", "error"))
+            "Plan",
+            plan_form(settings, centers, _message("Choose a dispatch workbook to upload.", "error")),
         )
 
     workspace = tempfile.mkdtemp(prefix="loadpairing-")
@@ -417,6 +518,7 @@ def _handle_plan(form: Form):
                 "Plan",
                 plan_form(
                     settings,
+                    centers,
                     _message(
                         f"No loads matched on tab {settings['tab']}"
                         + (f" for carrier {settings['carrier']}." if settings["carrier"] else ".")
@@ -430,10 +532,13 @@ def _handle_plan(form: Form):
 
     store = db.connect()
     try:
+        center = store.service_center(settings["dc_zip"])
         store.ensure_locations(
-            [db.Location(zip=stop.zip, city=stop.city, state=stop.state, store=stop.store)
+            [db.Location(zip=stop.zip, city=stop.city, state=stop.state, store=stop.store,
+                         service_center=center.zip)
              for load in parsed.loads for stop in load.stops]
-            + [db.Location(zip=settings["dc_zip"])]
+            + [db.Location(zip=center.zip, city=center.city, state=center.state,
+                           service_center=center.zip)]
         )
 
         router = router_from_env(os.environ.get("LOAD_PAIRING_ROUTER", "auto"))
@@ -442,7 +547,7 @@ def _handle_plan(form: Form):
 
         mileage = MileageService(store, router)
         mileage.refresh()
-        dwell = store.dwell_hours()
+        dwell = store.dwell_hours(center.zip)
 
         config = PairingConfig(
             dc_zip=settings["dc_zip"],
@@ -463,13 +568,15 @@ def _handle_plan(form: Form):
         )
         result = plan(trips, config)
         body = render_plan(
-            result, parsed.sheet_name, len(parsed.loads), parsed.stop_count, mileage.fetched, router.name
+            result, parsed.sheet_name, len(parsed.loads), parsed.stop_count, mileage.fetched,
+            router.name, center,
         )
     except RoutingError as exc:
         return "400 Bad Request", page(
             "Plan",
             plan_form(
                 settings,
+                centers,
                 _message(f"{exc}. Upload a zip,lat,lon CSV on the Locations page.", "error"),
             ),
         )
@@ -479,9 +586,45 @@ def _handle_plan(form: Form):
     return "200 OK", page("Plan", body)
 
 
+def _service_centers() -> list:
+    store = db.connect()
+    try:
+        return store.service_centers()
+    finally:
+        store.close()
+
+
+def _handle_service_center(form: Form):
+    zip_code = normalize_zip(form.get("zip", ""))
+    name = form.get("name", "").strip()
+
+    store = db.connect()
+    try:
+        if not zip_code or not name:
+            note = _message("A service center needs a ZIP and a name.", "error")
+            return "400 Bad Request", page("Service centers", render_service_centers(store, note))
+
+        added = store.save_service_center(
+            db.ServiceCenter(
+                zip=zip_code,
+                name=name,
+                city=form.get("city", "").strip(),
+                state=form.get("state", "").strip().upper(),
+            )
+        )
+        note = _message(
+            f"{name} ({zip_code}) {'added' if added else 'updated'}. "
+            "Upload a sheet against it on the Plan page."
+        )
+        return "200 OK", page("Service centers", render_service_centers(store, note))
+    finally:
+        store.close()
+
+
 def _handle_dwell(form: Form):
     store = db.connect()
     try:
+        selected = form.get("service_center", DEFAULT_DC_ZIP) or DEFAULT_DC_ZIP
         changed = 0
         for name, field in form.items():
             if not name.startswith("dwell:"):
@@ -491,16 +634,16 @@ def _handle_dwell(form: Form):
                 hours = float(field.text)
             except ValueError:
                 continue
-            existing = store.location(zip_code)
+            existing = store.location(zip_code, selected)
             if existing is not None and abs(existing.dwell_hours - hours) > 1e-9:
-                store.set_dwell(zip_code, hours)
+                store.set_dwell(zip_code, hours, selected)
                 changed += 1
         note = _message(
             f"Saved {changed} dwell change{'' if changed == 1 else 's'}."
             if changed
             else "No dwell values changed."
         )
-        return "200 OK", page("Locations", render_locations(store, note))
+        return "200 OK", page("Locations", render_locations(store, selected, note))
     finally:
         store.close()
 
@@ -526,7 +669,8 @@ def _handle_coordinates(form: Form):
             if filled
             else "No coordinates could be filled in. Upload a zip,lat,lon CSV, or set a routing API key."
         )
-        return "200 OK", page("Locations", render_locations(store, note))
+        selected = form.get("service_center", DEFAULT_DC_ZIP) or DEFAULT_DC_ZIP
+        return "200 OK", page("Locations", render_locations(store, selected, note))
     finally:
         store.close()
 

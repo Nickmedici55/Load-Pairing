@@ -99,11 +99,13 @@ class WebAppTest(unittest.TestCase):
         os.environ.update(self._env)
 
     def request(self, path, method="GET", body=b"", content_type="", auth=None):
+        path, _, query = path.partition("?")     # the server splits these, not the app
         environ = {}
         setup_testing_defaults(environ)
         environ.update(
             {
                 "PATH_INFO": path,
+                "QUERY_STRING": query,
                 "REQUEST_METHOD": method,
                 "CONTENT_TYPE": content_type,
                 "CONTENT_LENGTH": str(len(body)),
@@ -199,6 +201,72 @@ class WebAppTest(unittest.TestCase):
         # The Adirondack run cannot make its 05:15-09:00 window on these miles.
         self.assertIn("Unschedulable", html)
         self.assertIn("10375781", html)
+
+    def test_the_plan_names_the_service_center_it_ran_out_of(self):
+        self.prime_coordinates()
+        _status, html = self.post_plan()
+        self.assertIn("Out of New England SC", html)
+
+    def test_the_plan_form_offers_the_service_centers_as_a_dropdown(self):
+        _status, html = self.request("/")
+        self.assertIn('<select id="dc_zip" name="dc_zip">', html)
+        self.assertIn("New England SC", html)
+
+    def test_a_service_center_can_be_added_and_is_then_offered_for_upload(self):
+        body = b"zip=06103&name=Hartford+SC&city=Hartford&state=ct"
+        status, html = self.request(
+            "/service-centers", "POST", body, "application/x-www-form-urlencoded"
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Hartford SC (06103) added", html)
+
+        _status, form = self.request("/")
+        self.assertIn('value="06103"', form)
+        self.assertIn("Hartford SC", form)
+
+    def test_a_service_center_needs_a_zip_and_a_name(self):
+        status, html = self.request(
+            "/service-centers", "POST", b"zip=&name=", "application/x-www-form-urlencoded"
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("needs a ZIP and a name", html)
+
+    def test_a_sheet_cannot_be_uploaded_against_an_unknown_service_center(self):
+        status, html = self.post_plan(dc_zip="99999")
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("is not a service center", html)
+
+    def test_stores_stay_under_the_service_center_the_sheet_was_uploaded_for(self):
+        self.request(
+            "/service-centers", "POST", b"zip=06103&name=Hartford+SC",
+            "application/x-www-form-urlencoded",
+        )
+        self.post_plan()                      # the sheet runs out of 01020
+
+        _status, hartford = self.request("/locations?sc=06103")
+        self.assertIn("No sheet has been uploaded for Hartford SC yet", hartford)
+        self.assertNotIn("12946", hartford)
+
+        _status, chicopee = self.request("/locations?sc=01020")
+        self.assertIn("12946", chicopee)
+
+    def test_a_dwell_is_saved_against_the_service_center_it_was_shown_for(self):
+        self.request(
+            "/service-centers", "POST", b"zip=06103&name=Hartford+SC",
+            "application/x-www-form-urlencoded",
+        )
+        self.post_plan()
+        self.post_plan(dc_zip="06103")        # the same stores, from Hartford
+
+        status, html = self.request(
+            "/locations", "POST", b"service_center=06103&dwell:01040=3.5",
+            "application/x-www-form-urlencoded",
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Saved 1 dwell change", html)
+
+        _status, chicopee = self.request("/locations?sc=01020")
+        self.assertNotIn('value="3.50"', chicopee)
 
     def test_uploading_a_sheet_records_its_locations(self):
         self.post_plan()

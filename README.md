@@ -59,9 +59,12 @@ Three optional extras change how it runs, not what it does:
 ```
 loadpairing serve                               the web front end, on localhost:8000
 loadpairing sheets BOOK.xlsx                    list the tabs
-loadpairing plan BOOK.xlsx [options]            build the driver plan
+loadpairing plan BOOK.xlsx --service-center 01020   build the driver plan
+loadpairing service-centers list                the pickup locations
+loadpairing service-centers add 06103 "Hartford SC" --city Hartford --state CT
 loadpairing locations list                      every ZIP seen, with its store and dwell
-loadpairing locations dwell 01040 1.75          override one location's dwell
+loadpairing locations list --service-center 01020   only one service center's
+loadpairing locations dwell 01040 1.75 --service-center 01020   override a dwell
 loadpairing locations coords --csv centroids.csv   fill in ZIP coordinates
 loadpairing lanes list | lanes estimated        inspect the mileage cache
 ```
@@ -86,10 +89,13 @@ imply:
 
 * **/** — upload a workbook, pick the tab, carrier, DC ZIP and limits, get the
   driver plan with every stop on the clock.
-* **/locations** — every ZIP any sheet has mentioned, with the store numbers
-  delivered there and its dwell in an editable field. This is where the data
-  quality accrues. Also takes a `zip,lat,lon` CSV for the offline mileage
-  estimate.
+* **/service-centers** — the pickup locations. Every sheet is uploaded against
+  one, and its stores are kept under it, so two service centers delivering to
+  the same ZIP never share a dwell. A ZIP identifies a service center.
+* **/locations** — one service center's ZIPs, with the store numbers delivered
+  there and the dwell in an editable field. This is where the data quality
+  accrues. Also takes a `zip,lat,lon` CSV for the offline mileage estimate;
+  coordinates belong to the ZIP and serve every service center.
 * **/lanes** — the mileage cache, with the estimated rows called out.
 * **/healthz** — plain `ok`, for a platform health check.
 
