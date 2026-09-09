@@ -87,8 +87,13 @@ Useful `plan` options: `--router {auto,pcmiler,google,here,estimated}`,
 browser, which is what the spec's "uploaded sheet" and dispatcher-set dwell
 imply:
 
-* **/** — upload a workbook, pick the tab, carrier, DC ZIP and limits, get the
-  driver plan with every stop on the clock.
+* **/** — upload a workbook, pick the tab, carrier, service center and limits,
+  get the driver plan with every stop on the clock. From there, move loads
+  between drivers and re-plan to see what it does to the day, and save the
+  result under a name.
+* **/plans** — plans saved under a name, ready to reopen. A saved plan keeps
+  the loads it was built from, so it outlives the spreadsheet; miles and dwell
+  are re-read on open.
 * **/service-centers** — the pickup locations. Every sheet is uploaded against
   one, and its stores are kept under it, so two service centers delivering to
   the same ZIP never share a dwell. A ZIP identifies a service center.

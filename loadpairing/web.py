@@ -20,7 +20,10 @@ import tempfile
 import traceback
 from urllib.parse import parse_qs
 
-from . import db, geocode, report
+import json
+
+from . import arrange as arrange_loads
+from . import db, geocode, report, snapshot
 from .costing import DEFAULT_DWELL_HOURS
 from .formdata import Form, FormError, read_form
 from .mileage import ESTIMATED, MileageService, RoutingError, router_from_env
@@ -76,6 +79,13 @@ tr:last-child td { border-bottom:0; }
 .error { color:var(--bad); }
 .tag { font-size:11px; padding:1px 6px; border-radius:3px; border:1px solid var(--line); color:var(--dim); }
 p.hint { color:var(--dim); font-size:13px; margin:6px 0 0; }
+.move { display:inline-flex; align-items:center; gap:6px; margin:0 10px 0 0; font-size:13px;
+        color:var(--ink); font-variant-numeric:tabular-nums; }
+.move input { width:58px; padding:3px 6px; text-align:center; }
+.driver .pad { padding:8px 14px 0; }
+.driver .pad .note { margin:0 0 8px; }
+button.quiet { margin:0; padding:2px 8px; font-size:12px; font-weight:500;
+               background:transparent; color:var(--dim); border:1px solid var(--line); }
 """
 
 
@@ -88,7 +98,8 @@ def page(title: str, body: str) -> bytes:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} - Load Pairing</title><style>{STYLE}</style></head>
 <body><header><h1>Load Pairing</h1><nav>
-<a href="/">Plan a sheet</a><a href="/service-centers">Service centers</a>
+<a href="/">Plan a sheet</a><a href="/plans">Saved plans</a>
+<a href="/service-centers">Service centers</a>
 <a href="/locations">Locations</a><a href="/lanes">Lanes</a>
 </nav></header><main>{body}</main></body></html>""".encode("utf-8")
 
@@ -152,61 +163,110 @@ then on.</p>
 </form>"""
 
 
-def render_plan(result, sheet_name: str, load_count: int, stop_count: int, fetched: int,
-                router_name: str, center=None) -> str:
-    config = result.config
+def render_workspace(arrangement, baseline, view: dict, message: str = "") -> str:
+    """The plan, with the loads movable between drivers.
+
+    ``baseline`` is the plan as the matcher built it. Every rearrangement is
+    costed against that, so a dispatcher can see what their change bought or
+    cost rather than just what it is.
+    """
+    config = arrangement.config
+    center = view.get("center")
+    rearranged = arrangement.groups != baseline.groups
+
     warnings = []
-    if result.estimated_mileage:
+    if view.get("estimated_mileage"):
         warnings.append(
             "Some lanes use estimated mileage (great-circle x 1.20) rather than a routing source. "
             "Good for shaping the plan, not for dispatching."
         )
     if not config.windows.enforce:
         warnings.append("Delivery windows were ignored for this run.")
-    if result.layovers:
-        warnings.append(
-            f"{len(result.layovers)} load(s) need a layover: more work than one shift holds, so the "
-            "driver sleeps out. Delivery times are not checked across the break -- the sheet gives "
-            "an hour of the day, not a date, so which day each stop is due on is a dispatcher's call."
-        )
 
-    rows = "".join(
-        f"<tr><td>{esc(', '.join(rejection.load_ids))}</td><td>{esc(rejection.reason)}</td></tr>"
-        for rejection in result.unschedulable
-    )
-    unschedulable = (
-        f'<div class="card"><h2>Unschedulable</h2><table><tr><th>Load</th><th>Why</th></tr>{rows}</table></div>'
-        if rows
-        else ""
+    def delta(now: float, before: float, unit: str = "", places: int = 1) -> str:
+        """How this arrangement differs from the one the matcher built."""
+        if not rearranged or abs(now - before) < 0.05:
+            return ""
+        return f'<span class="tag">{now - before:+.{places}f}{unit} vs the built plan</span>'
+
+    problems = len(arrangement.problems)
+    saved_name = view.get("saved_name", "")
+    drivers = "".join(
+        _driver(index, driver)
+        for index, driver in enumerate(arrangement.drivers, start=1)
     )
 
-    return f"""<div class="card">
-<h2>{esc(sheet_name)} - {load_count} loads, {stop_count} stops</h2>
+    return f"""{message}
+<div class="card">
+<h2>{esc(view.get("sheet_name", "Plan"))} - {view.get("load_count", 0)} loads,
+{view.get("stop_count", 0)} stops</h2>
 <p class="hint">Out of {esc(center.label if center else config.dc_zip)}.</p>
 <div class="stats">
-  <div class="stat"><b>{result.drivers}</b><span>drivers</span></div>
-  <div class="stat"><b>{len(result.pairs)}</b><span>pairs</span></div>
-  <div class="stat"><b>{len([a for a in result.solos if not a.is_layover])}</b><span>solo</span></div>
-  <div class="stat"><b>{len(result.layovers)}</b><span>layover</span></div>
-  <div class="stat"><b>{len(result.unschedulable)}</b><span>unschedulable</span></div>
-  <div class="stat"><b>{result.solo_hours:.1f}</b><span>driver hours if unpaired</span></div>
-  <div class="stat"><b>{len(result.candidates)}</b><span>feasible pairs</span></div>
+  <div class="stat"><b>{arrangement.driver_count}</b><span>drivers
+      {delta(arrangement.driver_count, baseline.driver_count, places=0)}</span></div>
+  <div class="stat"><b>{arrangement.duty_hours:.1f}</b><span>hours on duty
+      {delta(arrangement.duty_hours, baseline.duty_hours, " h")}</span></div>
+  <div class="stat"><b>{arrangement.wait_hours:.1f}</b><span>hours waiting
+      {delta(arrangement.wait_hours, baseline.wait_hours, " h")}</span></div>
+  <div class="stat"><b>{problems}</b><span>drivers with a problem</span></div>
+  <div class="stat"><b>{view.get("solo_hours", 0.0):.1f}</b><span>driver hours if unpaired</span></div>
 </div>
 <p class="hint">Limits {config.max_duty_hours:g} h duty and {config.max_drive_hours:g} h drive;
 windows {'enforced' if config.windows.enforce else 'ignored'};
 equipment {'must match' if config.match_equipment else 'may differ'};
-mileage from {esc(router_name)}{f', {fetched} new lanes cached' if fetched else ''};
-matched by {esc(result.matcher)}.</p>
+mileage from {esc(view.get("router_name", "?"))}
+{f', {view["fetched"]} new lanes cached' if view.get("fetched") else ''}.</p>
 {''.join(f'<p class="note">{esc(text)}</p>' for text in warnings)}
 </div>
-<div class="card"><h2>Drivers</h2>{''.join(_driver(i, a) for i, a in enumerate(result.assignments, 1))}</div>
-{unschedulable}
+
+<form method="post" action="/arrange">
+<input type="hidden" name="loads" value="{esc(view.get("loads_json", "[]"))}">
+<input type="hidden" name="settings" value="{esc(view.get("settings_json", "{{}}"))}">
+<input type="hidden" name="baseline" value="{esc(view.get("baseline_json", "[]"))}">
+<div class="card">
+<h2>Drivers</h2>
+<p class="hint">The number beside a load is the driver running it. Give two loads the same number
+to put them on one driver, or a number nobody else has to split them apart, then re-plan to see
+what it does to the day. The running order within a driver is still chosen for you: every order is
+tried and the one that costs least is kept.</p>
+<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button></p>
+{drivers}
+<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button></p>
+</div>
+<div class="card">
+<h2>Save this plan</h2>
+<label for="plan_name">Name</label>
+<input id="plan_name" type="text" name="plan_name" value="{esc(saved_name)}"
+       placeholder="Tuesday 8/28 - two drivers on the Adirondack run">
+<button type="submit" name="action" value="save">Save plan</button>
+<p class="hint">Saved under {esc(center.name if center else config.dc_zip)}, and listed on
+<a href="/plans">Saved plans</a>. Saving over a name replaces that plan. A saved plan keeps the
+loads, not the miles or the dwell: reopening it re-costs the day against whatever the dwell says
+then.</p>
+</div>
+</form>
 <p><a href="/">Plan another sheet</a></p>"""
 
 
-def _driver(index: int, assignment) -> str:
-    loads = " + ".join(
-        f"{esc(trip.load.load_id)} <span class=\"tag\">{esc(trip.load.equipment)}</span> "
+def _driver(index: int, driver) -> str:
+    """One driver: who they are, what it costs, and where their loads can go."""
+    assignment = driver.assignment
+    moves = "".join(
+        f'<label class="move">{esc(load_id)}'
+        f'<input type="number" name="driver:{esc(load_id)}" value="{index}" min="1" step="1">'
+        f"</label>"
+        for load_id in driver.load_ids
+    )
+    notes = "".join(f'<p class="note">{esc(text)}</p>' for text in driver.warnings)
+
+    if assignment is None:
+        return f"""<div class="driver"><div class="head">
+<span class="who">Driver {index}</span><span>{moves}</span>
+<span class="meta">cannot be scheduled</span>
+</div><div class="pad">{notes}</div></div>"""
+
+    equipment = " + ".join(
+        f'{esc(trip.load.load_id)} <span class="tag">{esc(trip.load.equipment)}</span> '
         f"{trip.miles:.0f} mi"
         for trip in assignment.trips
     )
@@ -226,11 +286,37 @@ def _driver(index: int, assignment) -> str:
         for s in assignment.schedule
     )
     return f"""<div class="driver"><div class="head">
-<span class="who">Driver {index}</span><span>{loads}</span>
+<span class="who">Driver {index}</span><span>{moves}</span>
+<span class="meta">{equipment}</span>
 <span class="meta">{report.clock(assignment.start_hour)} - {report.clock(assignment.finish_hour)},
 {assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}
-</div><table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
+</div>{f'<div class="pad">{notes}</div>' if notes else ''}
+<table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
 {stops}</table></div>"""
+
+
+def render_saved_plans(store, message: str = "") -> str:
+    centers = {center.zip: center for center in store.service_centers()}
+    rows = "".join(
+        f'<tr><td><a href="/plans/open?id={esc(saved.id)}">{esc(saved.name)}</a></td>'
+        f'<td>{esc(centers[saved.service_center].name if saved.service_center in centers else saved.service_center)}</td>'
+        f"<td>{esc(saved.sheet_name or '-')}</td>"
+        f'<td class="num">{saved.load_count}</td>'
+        f'<td class="num">{saved.driver_count}</td>'
+        f'<td class="num">{esc(saved.saved_at)}</td>'
+        f'<td><form method="post" action="/plans/delete">'
+        f'<input type="hidden" name="id" value="{esc(saved.id)}">'
+        f'<button class="quiet" type="submit">delete</button></form></td></tr>'
+        for saved in store.saved_plans()
+    ) or '<tr><td colspan="7">Nothing saved yet.</td></tr>'
+
+    return f"""{message}
+<div class="card"><h2>Saved plans</h2>
+<p class="hint">A saved plan keeps the loads it was built from, so it reopens after the spreadsheet
+is gone. Miles and dwell are not saved: reopening re-costs the day against what the dwell says
+now, so a dwell you correct later shows up in every plan that touches that store.</p>
+<table><tr><th>Name</th><th>Service center</th><th>Sheet</th><th>Loads</th><th>Drivers</th>
+<th>Saved</th><th></th></tr>{rows}</table></div>"""
 
 
 def render_service_centers(store, message: str = "") -> str:
@@ -421,6 +507,14 @@ def _route(path: str, method: str, environ):
         return _with_store(lambda store: page("Plan", plan_form({}, store.service_centers())))
     if path == "/plan" and method == "POST":
         return _handle_plan(read_form(environ))
+    if path == "/arrange" and method == "POST":
+        return _handle_arrange(read_form(environ))
+    if path == "/plans" and method == "GET":
+        return _with_store(lambda store: page("Saved plans", render_saved_plans(store)))
+    if path == "/plans/open" and method == "GET":
+        return _handle_open_plan(_query(environ).get("id", ""))
+    if path == "/plans/delete" and method == "POST":
+        return _handle_delete_plan(read_form(environ))
     if path == "/service-centers":
         if method == "GET":
             return _with_store(lambda store: page("Service centers", render_service_centers(store)))
@@ -438,7 +532,8 @@ def _route(path: str, method: str, environ):
         return _handle_coordinates(read_form(environ))
     if path == "/lanes" and method == "GET":
         return _with_store(lambda store: page("Lanes", render_lanes(store)))
-    if path in ("/", "/plan", "/service-centers", "/locations", "/lanes", "/coordinates"):
+    if path in ("/", "/plan", "/arrange", "/plans", "/plans/open", "/plans/delete",
+                "/service-centers", "/locations", "/lanes", "/coordinates"):
         return "405 Method Not Allowed", page("Not allowed", _message("That method is not allowed here.", "error"))
     return "404 Not Found", page("Not found", _message("No such page.", "error"))
 
@@ -541,36 +636,19 @@ def _handle_plan(form: Form):
                            service_center=center.zip)]
         )
 
-        router = router_from_env(os.environ.get("LOAD_PAIRING_ROUTER", "auto"))
-        if router.name == ESTIMATED:
-            geocode.fill_coordinates(store)
+        config = _config(settings)
+        trips, view = _cost(store, parsed.loads, config, center)
+        view.update(sheet_name=parsed.sheet_name, stop_count=parsed.stop_count)
 
-        mileage = MileageService(store, router)
-        mileage.refresh()
-        dwell = store.dwell_hours(center.zip)
-
-        config = PairingConfig(
-            dc_zip=settings["dc_zip"],
-            max_duty_hours=form.number("max_duty", 14.0),
-            max_drive_hours=form.number("max_drive", 11.0),
-            match_equipment=settings["match_equipment"],
-            objective=settings["objective"],
-            windows=WindowPolicy(
-                enforce=settings["enforce_windows"],
-                earliest_start=form.number("earliest_start", 0.0),
-            ),
+        built = plan(trips, config)
+        groups = arrange_loads.groups_of(built)
+        baseline = arrange_loads.arrange(trips, groups, config)
+        view.update(
+            settings_json=json.dumps(settings, separators=(",", ":")),
+            loads_json=snapshot.dump_loads(parsed.loads),
+            baseline_json=snapshot.dump_groups(groups),
         )
-        trips = build_trips(
-            parsed.loads,
-            miles_for=mileage.miles,
-            dwell_for=lambda zip_code: dwell.get(zip_code, DEFAULT_DWELL_HOURS),
-            config=config,
-        )
-        result = plan(trips, config)
-        body = render_plan(
-            result, parsed.sheet_name, len(parsed.loads), parsed.stop_count, mileage.fetched,
-            router.name, center,
-        )
+        body = render_workspace(baseline, baseline, view)
     except RoutingError as exc:
         return "400 Bad Request", page(
             "Plan",
@@ -584,6 +662,238 @@ def _handle_plan(form: Form):
         store.close()
 
     return "200 OK", page("Plan", body)
+
+
+def _config(settings: dict) -> PairingConfig:
+    """The pairing configuration one set of settings describes."""
+    return PairingConfig(
+        dc_zip=settings["dc_zip"],
+        max_duty_hours=_number(settings.get("max_duty"), 14.0),
+        max_drive_hours=_number(settings.get("max_drive"), 11.0),
+        match_equipment=bool(settings.get("match_equipment")),
+        objective=settings.get("objective", OBJECTIVE_DUTY),
+        windows=WindowPolicy(
+            enforce=bool(settings.get("enforce_windows")),
+            earliest_start=_number(settings.get("earliest_start"), 0.0),
+        ),
+    )
+
+
+def _number(value, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _cost(store, loads, config: PairingConfig, center):
+    """Cost a set of loads against the miles and dwell on file right now.
+
+    Every way into the plan page goes through here -- a fresh upload, a
+    rearrangement, a saved plan reopened -- so all three price the day the same
+    way, and a dwell corrected in between shows up in all of them.
+    """
+    router = router_from_env(os.environ.get("LOAD_PAIRING_ROUTER", "auto"))
+    if router.name == ESTIMATED:
+        geocode.fill_coordinates(store)
+
+    mileage = MileageService(store, router)
+    mileage.refresh()
+    dwell = store.dwell_hours(center.zip)
+
+    trips = build_trips(
+        loads,
+        miles_for=mileage.miles,
+        dwell_for=lambda zip_code: dwell.get(zip_code, DEFAULT_DWELL_HOURS),
+        config=config,
+    )
+    view = {
+        "center": center,
+        "load_count": len(list(loads)),
+        "stop_count": sum(len(load.stops) for load in loads),
+        "router_name": router.name,
+        "fetched": mileage.fetched,
+        "estimated_mileage": any(trip.estimated for trip in trips),
+        "solo_hours": sum(trip.duty_hours for trip in trips),
+    }
+    return trips, view
+
+
+def _rebuild(form: Form):
+    """Rebuild the plan a submitted page carries, with the grouping it asks for.
+
+    Returns ``(arrangement, baseline, view, settings)``. Raises
+    :class:`SnapshotError` or :class:`ArrangeError` when the submission does not
+    describe a plan, which the caller turns into a message rather than a crash.
+    """
+    settings = _settings_json(form.get("settings", ""))
+    loads = snapshot.read_loads(form.get("loads", ""))
+    baseline_groups = snapshot.read_groups(form.get("baseline", ""))
+    groups = _groups_from(form, loads, baseline_groups)
+
+    config = _config(settings)
+    store = db.connect()
+    try:
+        center = store.service_center(settings["dc_zip"])
+        if center is None:
+            raise snapshot.SnapshotError(
+                f"{settings['dc_zip']} is no longer a service center; this plan cannot be re-costed"
+            )
+        trips, view = _cost(store, loads, config, center)
+    finally:
+        store.close()
+
+    view.update(
+        sheet_name=settings.get("sheet_name", "Plan"),
+        settings_json=json.dumps(settings, separators=(",", ":")),
+        loads_json=snapshot.dump_loads(loads),
+        baseline_json=snapshot.dump_groups(baseline_groups),
+        saved_name=form.get("plan_name", "").strip(),
+    )
+    arrangement = arrange_loads.arrange(trips, groups, config)
+    baseline = arrange_loads.arrange(trips, baseline_groups, config)
+    return arrangement, baseline, view, settings
+
+
+def _groups_from(form: Form, loads, fallback) -> tuple[tuple[str, ...], ...]:
+    """Read the driver number beside each load into a grouping.
+
+    Loads sharing a number share a driver. A load whose number is missing or
+    unreadable keeps its own driver rather than silently joining someone
+    else's.
+    """
+    numbered: dict[str, list[str]] = {}
+    seen = False
+    for load in loads:
+        raw = form.get(f"driver:{load.load_id}", "").strip()
+        try:
+            key = str(int(float(raw)))
+            seen = True
+        except ValueError:
+            key = f"~{load.load_id}"          # unreadable: leave it on its own
+        numbered.setdefault(key, []).append(load.load_id)
+
+    if not seen:
+        return tuple(tuple(group) for group in fallback)
+
+    def order(item):
+        key = item[0]
+        return (key.startswith("~"), int(key) if not key.startswith("~") else 0, key)
+
+    return tuple(tuple(group) for _key, group in sorted(numbered.items(), key=order))
+
+
+def _settings_json(text: str) -> dict:
+    if not text:
+        raise snapshot.SnapshotError("no settings in this submission")
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise snapshot.SnapshotError(f"the settings in this submission are not readable: {exc}")
+    if not isinstance(parsed, dict) or not parsed.get("dc_zip"):
+        raise snapshot.SnapshotError("the settings in this submission name no service center")
+    return parsed
+
+
+def _handle_arrange(form: Form):
+    """Re-cost a plan with the drivers the dispatcher asked for, or save it."""
+    try:
+        arrangement, baseline, view, settings = _rebuild(form)
+    except (snapshot.SnapshotError, arrange_loads.ArrangeError) as exc:
+        return "400 Bad Request", page(
+            "Plan", _message(f"{exc}. Upload the sheet again to start over.", "error")
+        )
+
+    if form.get("action", "") != "save":
+        return "200 OK", page("Plan", render_workspace(arrangement, baseline, view))
+
+    name = form.get("plan_name", "").strip()
+    if not name:
+        note = _message("Give the plan a name before saving it.", "error")
+        return "400 Bad Request", page("Plan", render_workspace(arrangement, baseline, view, note))
+
+    store = db.connect()
+    try:
+        settings = dict(settings, sheet_name=view.get("sheet_name", "Plan"))
+        plan_id, is_new = store.save_plan(
+            db.SavedPlan(
+                id="",
+                name=name,
+                service_center=settings["dc_zip"],
+                sheet_name=view.get("sheet_name", ""),
+                load_count=view.get("load_count", 0),
+                driver_count=arrangement.driver_count,
+                settings=json.dumps(settings, separators=(",", ":")),
+                loads=view.get("loads_json", "[]"),
+                groups=snapshot.dump_groups(arrangement.groups),
+            )
+        )
+    finally:
+        store.close()
+
+    view["saved_name"] = name
+    note = _message(
+        f"Saved as \u201c{name}\u201d" + ("." if is_new else ", replacing the plan of that name.")
+        + " It is on the Saved plans page."
+    )
+    return "200 OK", page("Plan", render_workspace(arrangement, baseline, view, note))
+
+
+def _handle_open_plan(plan_id: str):
+    """Reopen a saved plan, re-costed against the miles and dwell on file now."""
+    store = db.connect()
+    try:
+        saved = store.saved_plan(plan_id)
+        if saved is None:
+            return "404 Not Found", page(
+                "Saved plans", _message("That plan is no longer saved.", "error")
+            )
+        center = store.service_center(saved.service_center)
+        if center is None:
+            return "400 Bad Request", page(
+                "Saved plans",
+                _message(
+                    f"{saved.name} was planned out of {saved.service_center}, which is no longer "
+                    "a service center.",
+                    "error",
+                ),
+            )
+        try:
+            settings = _settings_json(saved.settings)
+            loads = snapshot.read_loads(saved.loads)
+            groups = snapshot.read_groups(saved.groups)
+            config = _config(settings)
+            trips, view = _cost(store, loads, config, center)
+            arrangement = arrange_loads.arrange(trips, groups, config)
+        except (snapshot.SnapshotError, arrange_loads.ArrangeError) as exc:
+            return "400 Bad Request", page(
+                "Saved plans", _message(f"{saved.name} cannot be reopened: {exc}", "error")
+            )
+    finally:
+        store.close()
+
+    view.update(
+        sheet_name=saved.sheet_name or settings.get("sheet_name", "Plan"),
+        settings_json=json.dumps(settings, separators=(",", ":")),
+        loads_json=saved.loads,
+        baseline_json=saved.groups,
+        saved_name=saved.name,
+    )
+    note = _message(
+        f"\u201c{saved.name}\u201d as saved on {saved.saved_at}, re-costed against the dwell and "
+        "miles on file now."
+    )
+    return "200 OK", page("Plan", render_workspace(arrangement, arrangement, view, note))
+
+
+def _handle_delete_plan(form: Form):
+    store = db.connect()
+    try:
+        deleted = store.delete_plan(form.get("id", ""))
+        note = _message("Plan deleted." if deleted else "That plan was already gone.")
+        return "200 OK", page("Saved plans", render_saved_plans(store, note))
+    finally:
+        store.close()
 
 
 def _service_centers() -> list:
