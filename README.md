@@ -88,9 +88,9 @@ browser, which is what the spec's "uploaded sheet" and dispatcher-set dwell
 imply:
 
 * **/** — upload a workbook, pick the tab, carrier, service center and limits,
-  get the driver plan with every stop on the clock. From there, move loads
-  between drivers and re-plan to see what it does to the day, and save the
-  result under a name.
+  get the driver plan with every stop on the clock. From there, rearrange it:
+  move loads between drivers, add a driver or collapse two together, and re-plan
+  to see what it does to the day. Save the result under a name.
 * **/plans** — plans saved under a name, ready to reopen. A saved plan keeps
   the loads it was built from, so it outlives the spreadsheet; miles and dwell
   are re-read on open.

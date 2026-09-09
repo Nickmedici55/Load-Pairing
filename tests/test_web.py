@@ -360,6 +360,69 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("vs the built plan", split)
         self.assertTrue(all(len(loads) == 1 for loads in self.drivers_in(split).values()))
 
+    def test_a_driver_can_be_added_and_filled_from_the_page(self):
+        _html, fields = self.planned()
+
+        _status, added = self.post_arrange(fields, action="add")
+        self.assertIn("no loads yet", added)
+        empty = re.search(r'name="spare" value="(\d+)"', added)
+        self.assertIsNotNone(empty, "the empty driver should survive the round trip")
+
+        # Putting that number beside a load moves the load onto the new driver.
+        status, filled = self.post_arrange(
+            self.form_fields(added), **{"10375774": int(empty.group(1))}
+        )
+
+        self.assertEqual(status, "200 OK")
+        self.assertNotIn("no loads yet", filled)          # the slot was taken up
+        self.assertEqual(
+            [loads for loads in self.drivers_in(filled).values() if loads == ["10375774"]],
+            [["10375774"]],
+        )
+
+    def test_an_empty_driver_waits_around_until_it_is_used_or_removed(self):
+        _html, fields = self.planned()
+        _status, added = self.post_arrange(fields, action="add")
+
+        # Re-planning without filling it leaves it there to be filled later.
+        _status, again = self.post_arrange(self.form_fields(added))
+        self.assertIn("no loads yet", again)
+
+        number = re.search(r'name="spare" value="(\d+)"', again).group(1)
+        _status, removed = self.post_arrange(self.form_fields(again), action=f"drop:{number}")
+        self.assertNotIn("no loads yet", removed)
+
+    def test_splitting_a_driver_gives_every_load_its_own(self):
+        html, fields = self.planned()
+        paired = [
+            number for number, loads in self.drivers_in(html).items() if len(loads) > 1
+        ]
+        self.assertTrue(paired, "the fixture should pair two loads")
+
+        status, split = self.post_arrange(fields, action=f"split:{paired[0]}")
+
+        self.assertEqual(status, "200 OK")
+        self.assertTrue(
+            all(len(loads) == 1 for loads in self.drivers_in(split).values()),
+            self.drivers_in(split),
+        )
+        self.assertIn("vs the built plan", split)
+
+    def test_every_load_can_be_put_on_one_driver(self):
+        html, fields = self.planned()
+        every = {load_id: 1 for loads in self.drivers_in(html).values() for load_id in loads}
+
+        status, one = self.post_arrange(fields, **every)
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(len(self.drivers_in(one)), 1)
+        self.assertIn("layover", one)          # more work than one shift holds
+
+    def test_the_page_names_a_free_driver_number(self):
+        html, _fields = self.planned()
+        self.assertRegex(html, r"<strong>a number nobody else has</strong>")
+        self.assertRegex(html, r"\d+ is\s*\n?free")
+
     def test_a_submission_that_is_not_a_plan_is_refused_cleanly(self):
         _html, fields = self.planned()
         status, html = self.post_arrange(dict(fields, loads="not a plan"))
