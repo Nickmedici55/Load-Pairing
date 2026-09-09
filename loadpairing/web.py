@@ -86,6 +86,9 @@ p.hint { color:var(--dim); font-size:13px; margin:6px 0 0; }
 .driver .pad .note { margin:0 0 8px; }
 button.quiet { margin:0; padding:2px 8px; font-size:12px; font-weight:500;
                background:transparent; color:var(--dim); border:1px solid var(--line); }
+button.quiet.spaced { margin-left:10px; }
+.driver.empty { border-style:dashed; }
+.driver.empty .head { border-bottom:0; }
 """
 
 
@@ -196,6 +199,15 @@ def render_workspace(arrangement, baseline, view: dict, message: str = "") -> st
         for index, driver in enumerate(arrangement.drivers, start=1)
     )
 
+    # Empty drivers a dispatcher has added and not filled yet. They are slots
+    # on the page rather than part of the plan, and are numbered after it.
+    spare_numbers = [
+        str(arrangement.driver_count + offset)
+        for offset in range(1, view.get("spare", 0) + 1)
+    ]
+    drivers += "".join(_empty_driver(number) for number in spare_numbers)
+    next_free = str(arrangement.driver_count + len(spare_numbers) + 1)
+
     return f"""{message}
 <div class="card">
 <h2>{esc(view.get("sheet_name", "Plan"))} - {view.get("load_count", 0)} loads,
@@ -223,15 +235,20 @@ mileage from {esc(view.get("router_name", "?"))}
 <input type="hidden" name="loads" value="{esc(view.get("loads_json", "[]"))}">
 <input type="hidden" name="settings" value="{esc(view.get("settings_json", "{{}}"))}">
 <input type="hidden" name="baseline" value="{esc(view.get("baseline_json", "[]"))}">
+<input type="hidden" name="spare" value="{esc(",".join(spare_numbers))}">
 <div class="card">
 <h2>Drivers</h2>
-<p class="hint">The number beside a load is the driver running it. Give two loads the same number
-to put them on one driver, or a number nobody else has to split them apart, then re-plan to see
-what it does to the day. The running order within a driver is still chosen for you: every order is
-tried and the one that costs least is kept.</p>
-<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button></p>
+<p class="hint">The number beside a load is the driver running it, and it is the whole mechanism:
+<strong>give two loads the same number</strong> to put them on one driver, or
+<strong>a number nobody else has</strong> to give a load a driver of its own - {esc(next_free)} is
+free. <em>Split</em> hands every load on a driver its own number in one go, and <em>Add a driver</em>
+makes an empty one to move work into. Re-plan to see what any of it does to the day. The running
+order within a driver is still chosen for you: every order is tried and the cheapest is kept.</p>
+<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button>
+<button class="quiet spaced" type="submit" name="action" value="add">Add a driver</button></p>
 {drivers}
-<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button></p>
+<p><button type="submit" name="action" value="arrange">Re-plan with these drivers</button>
+<button class="quiet spaced" type="submit" name="action" value="add">Add a driver</button></p>
 </div>
 <div class="card">
 <h2>Save this plan</h2>
@@ -248,9 +265,24 @@ then.</p>
 <p><a href="/">Plan another sheet</a></p>"""
 
 
+def _empty_driver(number: str) -> str:
+    """A driver with nothing on them yet, waiting to be given work."""
+    return f"""<div class="driver empty"><div class="head">
+<span class="who">Driver {esc(number)}</span>
+<span class="meta">no loads yet - put {esc(number)} beside any load to move it here</span>
+<button class="quiet" type="submit" name="action" value="drop:{esc(number)}">remove</button>
+</div></div>"""
+
+
 def _driver(index: int, driver) -> str:
     """One driver: who they are, what it costs, and where their loads can go."""
     assignment = driver.assignment
+    split = (
+        f'<button class="quiet" type="submit" name="action" value="split:{index}">'
+        "split</button>"
+        if len(driver.load_ids) > 1
+        else ""
+    )
     moves = "".join(
         f'<label class="move">{esc(load_id)}'
         f'<input type="number" name="driver:{esc(load_id)}" value="{index}" min="1" step="1">'
@@ -262,7 +294,7 @@ def _driver(index: int, driver) -> str:
     if assignment is None:
         return f"""<div class="driver"><div class="head">
 <span class="who">Driver {index}</span><span>{moves}</span>
-<span class="meta">cannot be scheduled</span>
+<span class="meta">cannot be scheduled</span>{split}
 </div><div class="pad">{notes}</div></div>"""
 
     equipment = " + ".join(
@@ -289,7 +321,7 @@ def _driver(index: int, driver) -> str:
 <span class="who">Driver {index}</span><span>{moves}</span>
 <span class="meta">{equipment}</span>
 <span class="meta">{report.clock(assignment.start_hour)} - {report.clock(assignment.finish_hour)},
-{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}
+{assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}{split}
 </div>{f'<div class="pad">{notes}</div>' if notes else ''}
 <table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
 {stops}</table></div>"""
@@ -729,7 +761,9 @@ def _rebuild(form: Form):
     settings = _settings_json(form.get("settings", ""))
     loads = snapshot.read_loads(form.get("loads", ""))
     baseline_groups = snapshot.read_groups(form.get("baseline", ""))
-    groups = _groups_from(form, loads, baseline_groups)
+    grouping = _grouping(form, loads, baseline_groups)
+    grouping, spare = _apply_action(form.get("action", ""), grouping, _spare_numbers(form))
+    groups = tuple(tuple(group) for group in grouping.values())
 
     config = _config(settings)
     store = db.connect()
@@ -749,18 +783,25 @@ def _rebuild(form: Form):
         loads_json=snapshot.dump_loads(loads),
         baseline_json=snapshot.dump_groups(baseline_groups),
         saved_name=form.get("plan_name", "").strip(),
+        # An empty driver a dispatcher asked for and has not filled yet. It is
+        # a slot on the page, not part of the plan: nothing is costed for it.
+        spare=len([number for number in spare if number not in grouping]),
     )
     arrangement = arrange_loads.arrange(trips, groups, config)
     baseline = arrange_loads.arrange(trips, baseline_groups, config)
     return arrangement, baseline, view, settings
 
 
-def _groups_from(form: Form, loads, fallback) -> tuple[tuple[str, ...], ...]:
+def _grouping(form: Form, loads, fallback) -> dict[str, list[str]]:
     """Read the driver number beside each load into a grouping.
 
-    Loads sharing a number share a driver. A load whose number is missing or
-    unreadable keeps its own driver rather than silently joining someone
-    else's.
+    Loads sharing a number share a driver: that is how two drivers are put
+    together. A number nobody else has is a driver of its own, which is how one
+    is added. A load whose number is missing or unreadable keeps its own driver
+    rather than silently joining someone else's.
+
+    Keyed by driver number so the buttons on the page -- split this driver,
+    empty that one -- can name the driver a dispatcher is looking at.
     """
     numbered: dict[str, list[str]] = {}
     seen = False
@@ -774,13 +815,46 @@ def _groups_from(form: Form, loads, fallback) -> tuple[tuple[str, ...], ...]:
         numbered.setdefault(key, []).append(load.load_id)
 
     if not seen:
-        return tuple(tuple(group) for group in fallback)
+        numbered = {str(index): list(group) for index, group in enumerate(fallback, start=1)}
+    return dict(sorted(numbered.items(), key=_driver_key))
 
-    def order(item):
-        key = item[0]
-        return (key.startswith("~"), int(key) if not key.startswith("~") else 0, key)
 
-    return tuple(tuple(group) for _key, group in sorted(numbered.items(), key=order))
+def _driver_key(item) -> tuple:
+    key = item[0]
+    return (True, 0, key) if key.startswith("~") else (False, int(key), "")
+
+
+def _next_free(grouping: dict[str, list[str]], taken=()) -> str:
+    """A driver number nobody is using."""
+    used = {int(key) for key in grouping if not key.startswith("~")}
+    used.update(int(number) for number in taken)
+    return str(max(used, default=0) + 1)
+
+
+def _apply_action(action: str, grouping: dict[str, list[str]], spare: list[str]):
+    """Carry out a button on the plan page, returning the new grouping.
+
+    ``split`` gives each of one driver's loads a driver of its own -- the quick
+    way to add drivers. ``add`` and ``drop`` make and remove an empty driver to
+    move loads into. Everything else is done with the numbers themselves.
+    """
+    verb, _, which = action.partition(":")
+
+    if verb == "add":
+        spare.append(_next_free(grouping, spare))
+    elif verb == "drop" and which in spare:
+        spare.remove(which)
+    elif verb == "split" and which in grouping:
+        here = grouping.pop(which)
+        grouping[which] = here[:1]                 # the first load keeps the number
+        for load_id in here[1:]:
+            grouping[_next_free(grouping, spare)] = [load_id]
+    return dict(sorted(grouping.items(), key=_driver_key)), spare
+
+
+def _spare_numbers(form: Form) -> list[str]:
+    """The empty drivers the page was showing, as it numbered them."""
+    return [part for part in form.get("spare", "").split(",") if part.strip().isdigit()]
 
 
 def _settings_json(text: str) -> dict:
@@ -806,6 +880,7 @@ def _handle_arrange(form: Form):
 
     if form.get("action", "") != "save":
         return "200 OK", page("Plan", render_workspace(arrangement, baseline, view))
+
 
     name = form.get("plan_name", "").strip()
     if not name:

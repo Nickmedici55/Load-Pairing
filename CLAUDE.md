@@ -135,8 +135,15 @@ The matcher answers "the fewest drivers this sheet can run on". A dispatcher
 knows things it does not -- who is already out, which receiver will wait -- so
 the plan page lets them move loads between drivers and re-cost the day.
 
-- Each load carries the number of the driver running it. Loads sharing a number
-  share a driver; a number nobody else has splits them apart.
+- Each load carries the number of the driver running it, and that number is the
+  whole mechanism. Loads sharing a number share a driver, which is how two
+  drivers are put together; a number nobody else has is a driver of its own,
+  which is how one is added. A driver nobody is numbered onto stops existing.
+- *Split* hands every load on one driver its own number in a single click, and
+  *Add a driver* makes an empty one to move work into. Both are shortcuts for
+  editing the numbers by hand, not a second mechanism. An empty driver is a slot
+  on the page, never part of the plan: nothing is costed for it and it is not
+  saved.
 - Nothing is rejected. A grouping that breaks the duty limit or misses a
   delivery time still comes back costed with the breakage named: the point is
   to show the consequence, not to refuse.
