@@ -360,6 +360,59 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("vs the built plan", split)
         self.assertTrue(all(len(loads) == 1 for loads in self.drivers_in(split).values()))
 
+    def order_on(self, html, driver_number):
+        """The running order a driver's schedule table shows, in sequence."""
+        block = html.split('<div class="driver"')[int(driver_number)]
+        seen = []
+        for load_id in re.findall(r"<tr><td>(\d+)</td>", block):
+            if load_id not in seen:
+                seen.append(load_id)
+        return seen
+
+    def test_a_pair_shows_what_each_running_order_costs(self):
+        html, _fields = self.planned()
+
+        self.assertIn("Running order", html)
+        self.assertIn("run this way", html)
+        # Both ways round, each with its duty and drive hours.
+        orders = re.search(r"Running order.*?</table>", html, re.S).group(0)
+        self.assertIn("10375774 &rarr; 10375775", orders)
+        self.assertIn("10375775 &rarr; 10375774", orders)
+        self.assertEqual(orders.count("h</td>"), 4)      # duty and drive, twice
+        self.assertIn("running", orders)
+
+    def test_a_driver_runs_the_order_that_is_asked_for(self):
+        html, fields = self.planned()
+        paired = [n for n, loads in self.drivers_in(html).items() if len(loads) > 1][0]
+        before = self.order_on(html, paired)
+        self.assertEqual(len(before), 2)
+
+        status, flipped = self.post_arrange(
+            fields, action="order:" + ",".join(reversed(before))
+        )
+
+        self.assertEqual(status, "200 OK")
+        paired_now = [n for n, loads in self.drivers_in(flipped).items() if len(loads) > 1][0]
+        self.assertEqual(self.order_on(flipped, paired_now), list(reversed(before)))
+
+    def test_a_chosen_order_survives_the_next_re_plan(self):
+        html, fields = self.planned()
+        paired = [n for n, loads in self.drivers_in(html).items() if len(loads) > 1][0]
+        wanted = list(reversed(self.order_on(html, paired)))
+        _status, flipped = self.post_arrange(fields, action="order:" + ",".join(wanted))
+
+        # Re-planning without touching anything must not quietly re-sort it.
+        _status, again = self.post_arrange(self.form_fields(flipped))
+
+        paired_now = [n for n, loads in self.drivers_in(again).items() if len(loads) > 1][0]
+        self.assertEqual(self.order_on(again, paired_now), wanted)
+
+    def test_a_solo_driver_has_no_order_to_choose(self):
+        html, _fields = self.planned()
+        solo = [n for n, loads in self.drivers_in(html).items() if len(loads) == 1][0]
+        block = html.split('<div class="driver"')[int(solo)]
+        self.assertNotIn("Running order", block)
+
     def test_a_driver_can_be_added_and_filled_from_the_page(self):
         _html, fields = self.planned()
 
@@ -455,6 +508,22 @@ class WebAppTest(unittest.TestCase):
         # The load moved before saving is still on a driver of its own.
         alone = [loads for loads in self.drivers_in(reopened).values() if loads == ["10375774"]]
         self.assertEqual(len(alone), 1)
+
+    def test_a_chosen_running_order_survives_being_saved_and_reopened(self):
+        html, fields = self.planned()
+        paired = [n for n, loads in self.drivers_in(html).items() if len(loads) > 1][0]
+        wanted = list(reversed(self.order_on(html, paired)))
+        _status, flipped = self.post_arrange(fields, action="order:" + ",".join(wanted))
+
+        saving = dict(self.form_fields(flipped), plan_name="Flipped")
+        self.post_arrange(saving, action="save")
+        _status, listed = self.request("/plans")
+        plan_id = re.search(r'/plans/open\?id=([0-9a-f]+)', listed).group(1)
+
+        _status, reopened = self.request(f"/plans/open?id={plan_id}")
+
+        paired_now = [n for n, loads in self.drivers_in(reopened).items() if len(loads) > 1][0]
+        self.assertEqual(self.order_on(reopened, paired_now), wanted)
 
     def test_saving_over_a_name_replaces_that_plan(self):
         _html, fields = self.planned()

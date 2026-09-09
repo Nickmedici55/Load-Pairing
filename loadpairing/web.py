@@ -88,6 +88,10 @@ button.quiet { margin:0; padding:2px 8px; font-size:12px; font-weight:500;
                background:transparent; color:var(--dim); border:1px solid var(--line); }
 button.quiet.spaced { margin-left:10px; }
 .driver.empty { border-style:dashed; }
+.orders { padding:10px 14px 2px; }
+.orders table { font-size:13px; }
+.orders td, .orders th { padding-left:0; padding-right:16px; }
+.orders .note { font-size:13px; }
 .driver.empty .head { border-bottom:0; }
 """
 
@@ -286,16 +290,18 @@ def _driver(index: int, driver) -> str:
     moves = "".join(
         f'<label class="move">{esc(load_id)}'
         f'<input type="number" name="driver:{esc(load_id)}" value="{index}" min="1" step="1">'
+        f'<input type="hidden" name="seq:{esc(load_id)}" value="{position}">'
         f"</label>"
-        for load_id in driver.load_ids
+        for position, load_id in enumerate(driver.load_ids, start=1)
     )
+    orders = _orders(driver)
     notes = "".join(f'<p class="note">{esc(text)}</p>' for text in driver.warnings)
 
     if assignment is None:
         return f"""<div class="driver"><div class="head">
 <span class="who">Driver {index}</span><span>{moves}</span>
 <span class="meta">cannot be scheduled</span>{split}
-</div><div class="pad">{notes}</div></div>"""
+</div><div class="pad">{notes}</div>{orders}</div>"""
 
     equipment = " + ".join(
         f'{esc(trip.load.load_id)} <span class="tag">{esc(trip.load.equipment)}</span> '
@@ -322,9 +328,55 @@ def _driver(index: int, driver) -> str:
 <span class="meta">{equipment}</span>
 <span class="meta">{report.clock(assignment.start_hour)} - {report.clock(assignment.finish_hour)},
 {assignment.duty_hours:.1f} h duty, {assignment.drive_hours:.1f} h drive{waiting}</span>{layover}{split}
-</div>{f'<div class="pad">{notes}</div>' if notes else ''}
+</div>{f'<div class="pad">{notes}</div>' if notes else ''}{orders}
 <table><tr><th>Load</th><th>On site</th><th>Stop</th><th>Window</th><th>Wait</th></tr>
 {stops}</table></div>"""
+
+
+#: Running orders shown per driver. Two loads have two orders and three have
+#: six; past that only the shortest few are worth the room.
+MAX_ORDERS_SHOWN = 6
+
+
+def _orders(driver) -> str:
+    """What each running order for this driver's loads would cost.
+
+    A pair that only works one way round is the whole reason this is here, so
+    the orders that do not work are listed too, with what stops them.
+    """
+    if len(driver.options) < 2:
+        return ""
+
+    rows = []
+    for position, option in enumerate(driver.options[:MAX_ORDERS_SHOWN]):
+        running = position == 0
+        if option.feasible:
+            cost = (
+                f'<td class="num">{option.duty_hours:.1f} h</td>'
+                f'<td class="num">{option.drive_hours:.1f} h</td>'
+            )
+            action = (
+                '<span class="tag">running</span>'
+                if running
+                else '<button class="quiet" type="submit" name="action" '
+                f'value="order:{esc(",".join(option.load_ids))}">run this way</button>'
+            )
+        else:
+            cost = f'<td class="note" colspan="2">{esc(option.reason)}</td>'
+            action = '<span class="tag">running</span>' if running else ""
+        rows.append(
+            f'<tr><td class="num">{" &rarr; ".join(esc(load_id) for load_id in option.load_ids)}</td>'
+            f"{cost}<td>{action}</td></tr>"
+        )
+
+    caption = (
+        '<p class="hint">Single-shift figures: this driver sleeps out whichever order they run.</p>'
+        if driver.is_layover
+        else ""
+    )
+    return f"""<div class="orders"><table>
+<tr><th>Running order</th><th>Duty</th><th>Drive</th><th></th></tr>
+{"".join(rows)}</table>{caption}</div>"""
 
 
 def render_saved_plans(store, message: str = "") -> str:
@@ -816,7 +868,20 @@ def _grouping(form: Form, loads, fallback) -> dict[str, list[str]]:
 
     if not seen:
         numbered = {str(index): list(group) for index, group in enumerate(fallback, start=1)}
+    else:
+        # The turn order the page was showing. Sorting is stable, so loads
+        # arriving from another driver keep the order they are listed in.
+        for group in numbered.values():
+            group.sort(key=lambda load_id: _sequence(form, load_id))
     return dict(sorted(numbered.items(), key=_driver_key))
+
+
+def _sequence(form: Form, load_id: str) -> float:
+    """Where a load runs in its driver's day, as the page had it."""
+    try:
+        return float(form.get(f"seq:{load_id}", "").strip())
+    except ValueError:
+        return 0.0
 
 
 def _driver_key(item) -> tuple:
@@ -844,6 +909,13 @@ def _apply_action(action: str, grouping: dict[str, list[str]], spare: list[str])
         spare.append(_next_free(grouping, spare))
     elif verb == "drop" and which in spare:
         spare.remove(which)
+    elif verb == "order" and which:
+        # A running order picked off the page, named by its loads in sequence.
+        wanted = [load_id for load_id in which.split(",") if load_id]
+        for key, loads_here in grouping.items():
+            if sorted(loads_here) == sorted(wanted):
+                grouping[key] = wanted
+                break
     elif verb == "split" and which in grouping:
         here = grouping.pop(which)
         grouping[which] = here[:1]                 # the first load keeps the number

@@ -97,16 +97,51 @@ class ArrangeTest(unittest.TestCase):
         self.assertIn("layover", " ".join(driver.warnings))
         self.assertGreater(driver.assignment.shifts, 1)
 
-    def test_the_running_order_within_a_driver_is_chosen_not_dictated(self):
-        # C only takes freight 05:00-06:00, so it has to run first whatever
-        # order the dispatcher lists the two loads in.
+    def test_the_order_a_driver_runs_is_the_one_asked_for(self):
+        # C only takes freight 05:00-06:00, so it has to run first. Listed the
+        # other way round the day is run as listed, and fails as listed.
         trips, config = trips_for(HOLYOKE, MORNING)
 
-        listed_backwards = arrange(trips, (("A", "C"),), config)
+        backwards = arrange(trips, (("A", "C"),), config).drivers[0]
+        forwards = arrange(trips, (("C", "A"),), config).drivers[0]
 
-        driver = listed_backwards.drivers[0]
-        self.assertTrue(driver.scheduled, driver.warnings)
-        self.assertEqual(driver.load_ids[0], "C")
+        self.assertEqual(backwards.load_ids, ("A", "C"))
+        self.assertFalse(backwards.scheduled)
+        self.assertEqual(forwards.load_ids, ("C", "A"))
+        self.assertTrue(forwards.scheduled, forwards.warnings)
+
+    def test_an_order_that_does_not_work_is_told_the_one_that_does(self):
+        trips, config = trips_for(HOLYOKE, MORNING)
+
+        backwards = arrange(trips, (("A", "C"),), config).drivers[0]
+
+        better = backwards.best_alternative
+        self.assertIsNotNone(better)
+        self.assertEqual(better.load_ids, ("C", "A"))
+        self.assertGreater(better.duty_hours, 0.0)
+        self.assertIn("the other way round it works", " ".join(backwards.warnings))
+
+    def test_both_orders_of_a_pair_come_back_costed(self):
+        trips, config = trips_for(HOLYOKE, CHICOPEE)
+
+        driver = arrange(trips, (("A", "B"),), config).drivers[0]
+
+        self.assertEqual(len(driver.options), 2)
+        self.assertEqual(driver.options[0].load_ids, ("A", "B"))     # the one running
+        self.assertEqual(driver.alternatives[0].load_ids, ("B", "A"))
+        for option in driver.options:
+            self.assertTrue(option.feasible)
+            self.assertGreater(option.duty_hours, 0.0)
+            self.assertGreater(option.drive_hours, 0.0)
+
+    def test_a_solo_driver_has_one_order_and_no_alternatives(self):
+        trips, config = trips_for(HOLYOKE, CHICOPEE)
+
+        driver = arrange(trips, (("A",), ("B",)), config).drivers[0]
+
+        self.assertEqual(len(driver.options), 1)
+        self.assertEqual(driver.alternatives, ())
+        self.assertIsNone(driver.best_alternative)
 
     def test_every_load_has_to_be_on_exactly_one_driver(self):
         trips, config = trips_for(HOLYOKE, CHICOPEE)

@@ -10,10 +10,11 @@ here is whatever they say it is, and nothing is rejected. A grouping that
 breaks the duty limit or misses a delivery time still comes back costed, with
 the breakage named. The point is to show the consequence, not to refuse.
 
-Within one driver the running order is still chosen rather than dictated: the
-same load pair can be feasible one way round and impossible the other, and
-picking the wrong one would report a false problem. Every order is tried while
-there are few enough to enumerate.
+Within one driver the running order is the dispatcher's too. The same pair can
+be feasible one way round and impossible the other, so every order is costed and
+kept: the one being run, and what each of the others would have cost. That is
+what answers "is this pair doable" -- not a verdict, but both answers side by
+side.
 """
 
 from __future__ import annotations
@@ -36,12 +37,47 @@ class ArrangeError(Exception):
 
 
 @dataclass(frozen=True)
+class Option:
+    """One running order for a driver's loads, costed."""
+
+    load_ids: tuple[str, ...]
+    feasible: bool
+    duty_hours: float = 0.0
+    drive_hours: float = 0.0
+    wait_hours: float = 0.0
+    reason: str = ""
+
+    @property
+    def label(self) -> str:
+        return " then ".join(self.load_ids)
+
+
+@dataclass(frozen=True)
 class Driver:
     """One driver's worth of an arrangement, costed."""
 
     load_ids: tuple[str, ...]
     assignment: Optional[Assignment]
     warnings: tuple[str, ...] = ()
+    #: Every running order tried, the one being run first.
+    options: tuple[Option, ...] = ()
+
+    @property
+    def alternatives(self) -> tuple[Option, ...]:
+        return self.options[1:]
+
+    @property
+    def best_alternative(self) -> Optional[Option]:
+        """The cheapest other order that works, if one does."""
+        running = self.options[0] if self.options else None
+        for option in self.alternatives:
+            if not option.feasible:
+                continue
+            if running is None or not running.feasible:
+                return option
+            if option.duty_hours < running.duty_hours - 0.05:
+                return option
+        return None
 
     @property
     def scheduled(self) -> bool:
@@ -144,7 +180,14 @@ def _check(by_id: dict[str, Trip], groups: Sequence[Sequence[str]]) -> None:
 
 
 def _cost(trips: tuple[Trip, ...], config: PairingConfig) -> Driver:
-    """Schedule one driver's loads, saying what the grouping costs."""
+    """Schedule one driver's loads in the order given, and cost the others.
+
+    The order is the dispatcher's: it is run as listed rather than quietly
+    improved, because a plan that reorders itself cannot be checked against
+    what was asked for. What the other orders would have cost comes back
+    alongside, so a pair that only works one way round says so instead of
+    simply failing.
+    """
     load_ids = tuple(trip.load.load_id for trip in trips)
     warnings: list[str] = []
 
@@ -156,32 +199,80 @@ def _cost(trips: tuple[Trip, ...], config: PairingConfig) -> Driver:
             f"{drive:.1f} h of driving, over the {config.max_drive_hours:g} h limit"
         )
 
+    options, schedules = _options(trips, config)
+
     # More work than a shift holds: the driver sleeps out, which is how the
     # planner treats a load too big to pair rather than calling it impossible.
     if working > config.max_duty_hours + 1e-9 or drive > config.max_drive_hours + 1e-9:
-        return _layover(trips, config, warnings, "more work than one shift holds")
-
-    ordered, result = _best_order(trips, config)
-    if not result.feasible:
-        warnings.append(result.reason)
-        return Driver(load_ids, None, tuple(warnings))
-
-    if result.duty_hours > config.max_duty_hours + 1e-9:
-        # The work fits a shift; waiting on delivery times is what does not.
-        waiting = result.duty_hours - working
         return _layover(
-            ordered,
-            config,
-            warnings,
-            f"{result.duty_hours:.1f} h on duty once the {waiting:.1f} h waiting on delivery "
-            f"windows is counted, over the {config.max_duty_hours:g} h limit",
+            trips, config, warnings, "more work than one shift holds", options
         )
 
-    return Driver(tuple(trip.load.load_id for trip in ordered), _assignment(ordered, result),
-                  tuple(warnings))
+    running = options[0]
+
+    if not running.feasible:
+        warnings.append(running.reason)
+        better = Driver(load_ids, None, (), options).best_alternative
+        if better is not None:
+            warnings.append(
+                f"{'the other way round' if len(load_ids) == 2 else better.label} it works: "
+                f"{better.duty_hours:.1f} h on duty and {better.drive_hours:.1f} h driving"
+            )
+        return Driver(load_ids, None, tuple(warnings), options)
+
+    if running.duty_hours > config.max_duty_hours + 1e-9:
+        # The work fits a shift; waiting on delivery times is what does not.
+        waiting = running.duty_hours - working
+        return _layover(
+            trips,
+            config,
+            warnings,
+            f"{running.duty_hours:.1f} h on duty once the {waiting:.1f} h waiting on delivery "
+            f"windows is counted, over the {config.max_duty_hours:g} h limit",
+            options,
+        )
+
+    return Driver(load_ids, _assignment(trips, schedules[0]), tuple(warnings), options)
 
 
-def _layover(trips: tuple[Trip, ...], config: PairingConfig, warnings: list[str], why: str) -> Driver:
+def _options(trips: tuple[Trip, ...], config: PairingConfig):
+    """Cost every running order, the one being run first.
+
+    Beyond :data:`MAX_ORDERED` loads the orders are not enumerated: the count
+    grows as a factorial, and nobody runs six turns in a day.
+    """
+    orders = [trips] if len(trips) > MAX_ORDERED else list(permutations(trips))
+    costed = []
+    for order in orders:
+        result = schedule(order, config.windows)
+        costed.append((_option(order, result), result))
+
+    running, rest = costed[0], costed[1:]
+    rest.sort(key=lambda pair: (not pair[0].feasible, pair[0].duty_hours))
+    ordered = [running, *rest]
+    return tuple(item[0] for item in ordered), tuple(item[1] for item in ordered)
+
+
+def _option(trips: tuple[Trip, ...], result: Schedule) -> Option:
+    load_ids = tuple(trip.load.load_id for trip in trips)
+    if not result.feasible:
+        return Option(load_ids, feasible=False, reason=result.reason)
+    return Option(
+        load_ids,
+        feasible=True,
+        duty_hours=result.duty_hours,
+        drive_hours=sum(trip.drive_hours for trip in trips),
+        wait_hours=max(0.0, result.duty_hours - sum(trip.duty_hours for trip in trips)),
+    )
+
+
+def _layover(
+    trips: tuple[Trip, ...],
+    config: PairingConfig,
+    warnings: list[str],
+    why: str,
+    options: tuple[Option, ...] = (),
+) -> Driver:
     """Lay a driver's work across shifts, saying why it did not fit in one.
 
     Delivery times are not checked across a rest: the sheet gives an hour of
@@ -196,25 +287,8 @@ def _layover(trips: tuple[Trip, ...], config: PairingConfig, warnings: list[str]
         tuple(trip.load.load_id for trip in trips),
         _assignment(trips, result),
         tuple(warnings),
+        options,
     )
-
-
-def _best_order(trips: tuple[Trip, ...], config: PairingConfig) -> tuple[tuple[Trip, ...], Schedule]:
-    """The running order that costs the least, or the given one if none works."""
-    if len(trips) > MAX_ORDERED:
-        return trips, schedule(trips, config.windows)
-
-    best: Optional[tuple[tuple[Trip, ...], Schedule]] = None
-    first: Optional[tuple[tuple[Trip, ...], Schedule]] = None
-    for order in permutations(trips):
-        result = schedule(order, config.windows)
-        if first is None:
-            first = (order, result)
-        if not result.feasible:
-            continue
-        if best is None or result.duty_hours < best[1].duty_hours - 1e-9:
-            best = (order, result)
-    return best or first
 
 
 def _assignment(trips: tuple[Trip, ...], result: Schedule) -> Assignment:
