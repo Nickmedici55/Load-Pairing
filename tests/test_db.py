@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from loadpairing.db import Lane, Location, ServiceCenter, SqliteStore, connect
+from loadpairing.db import Lane, Location, SavedPlan, ServiceCenter, SqliteStore, connect
 
 
 class StoreTest(unittest.TestCase):
@@ -115,6 +115,70 @@ class StoreTest(unittest.TestCase):
 
     def test_an_unknown_lane_is_a_miss(self):
         self.assertIsNone(self.store.lane("01020", "12946"))
+
+
+class SavedPlanTest(unittest.TestCase):
+    def setUp(self):
+        self.store = connect(":memory:")
+
+    def tearDown(self):
+        self.store.close()
+
+    def plan(self, name="Tuesday", groups='[["A","B"]]', drivers=1, center="01020"):
+        return SavedPlan(
+            id="",
+            name=name,
+            service_center=center,
+            sheet_name="Dispatch Order_3",
+            load_count=2,
+            driver_count=drivers,
+            settings='{"dc_zip":"01020"}',
+            loads='[{"load_id":"A"}]',
+            groups=groups,
+        )
+
+    def test_a_plan_is_saved_and_comes_back_whole(self):
+        plan_id, is_new = self.store.save_plan(self.plan())
+
+        self.assertTrue(is_new)
+        saved = self.store.saved_plan(plan_id)
+        self.assertEqual(saved.name, "Tuesday")
+        self.assertEqual(saved.groups, '[["A","B"]]')
+        self.assertEqual(saved.driver_count, 1)
+        self.assertTrue(saved.saved_at)
+
+    def test_saving_over_a_name_replaces_that_plan_and_keeps_its_link(self):
+        first, _ = self.store.save_plan(self.plan())
+
+        second, is_new = self.store.save_plan(
+            self.plan(groups='[["A"],["B"]]', drivers=2)
+        )
+
+        self.assertEqual(second, first)                  # the link still works
+        self.assertFalse(is_new)
+        self.assertEqual(len(self.store.saved_plans()), 1)
+        self.assertEqual(self.store.saved_plan(first).groups, '[["A"],["B"]]')
+        self.assertEqual(self.store.saved_plan(first).driver_count, 2)
+
+    def test_one_name_per_service_center_not_one_overall(self):
+        self.store.save_service_center(ServiceCenter("06103", "Hartford SC"))
+        first, _ = self.store.save_plan(self.plan())
+        second, is_new = self.store.save_plan(self.plan(center="06103"))
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(is_new)
+        self.assertEqual(len(self.store.saved_plans()), 2)
+        self.assertEqual(len(self.store.saved_plans("01020")), 1)
+
+    def test_a_saved_plan_can_be_deleted(self):
+        plan_id, _ = self.store.save_plan(self.plan())
+
+        self.assertTrue(self.store.delete_plan(plan_id))
+        self.assertIsNone(self.store.saved_plan(plan_id))
+        self.assertFalse(self.store.delete_plan(plan_id))
+
+    def test_an_unknown_plan_is_a_miss(self):
+        self.assertIsNone(self.store.saved_plan("nope"))
 
 
 class MigrationTest(unittest.TestCase):

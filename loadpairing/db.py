@@ -12,6 +12,10 @@ nothing installed. Both back ends carry the same three tables:
   sheet uploaded for that service center, and from then on the tool reads
   whatever has been set. Two service centers delivering to the same ZIP keep
   separate rows, so one's dwell never leaks into the other's plan.
+* ``saved_plan`` -- a plan a dispatcher named and kept, holding the loads it
+  was built from so it can be reopened after the spreadsheet is gone. Miles and
+  dwell are not stored: those are read fresh, so a reopened plan reflects what
+  the dwell says now.
 * ``lane`` -- mileage between two ZIPs, cached permanently on first fetch and
   shared by every service center: miles are miles.
   ``source = 'estimated'`` marks a row that came from the offline fallback
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -49,6 +54,22 @@ CREATE TABLE IF NOT EXISTS location (
     first_seen   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (service_center, zip)
 );
+
+CREATE TABLE IF NOT EXISTS saved_plan (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    service_center TEXT NOT NULL,
+    sheet_name     TEXT,
+    load_count     INTEGER NOT NULL DEFAULT 0,
+    driver_count   INTEGER NOT NULL DEFAULT 0,
+    settings       TEXT NOT NULL,
+    loads          TEXT NOT NULL,
+    groups         TEXT NOT NULL,
+    saved_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS saved_plan_name_idx
+    ON saved_plan (service_center, name);
 
 CREATE TABLE IF NOT EXISTS lane (
     from_zip    TEXT NOT NULL,
@@ -81,6 +102,22 @@ CREATE TABLE IF NOT EXISTS location (
     first_seen   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (service_center, zip)
 );
+
+CREATE TABLE IF NOT EXISTS saved_plan (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    service_center TEXT NOT NULL,
+    sheet_name     TEXT,
+    load_count     INTEGER NOT NULL DEFAULT 0,
+    driver_count   INTEGER NOT NULL DEFAULT 0,
+    settings       TEXT NOT NULL,
+    loads          TEXT NOT NULL,
+    groups         TEXT NOT NULL,
+    saved_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS saved_plan_name_idx
+    ON saved_plan (service_center, name);
 
 CREATE TABLE IF NOT EXISTS lane (
     from_zip    TEXT NOT NULL,
@@ -135,6 +172,47 @@ class Location:
     lon: Optional[float] = None
     dwell_hours: float = DEFAULT_DWELL_HOURS
     service_center: str = DEFAULT_SERVICE_CENTER.zip
+
+
+@dataclass(frozen=True)
+class PlanSummary:
+    """A saved plan as it appears in a list: no payload, just what it is."""
+
+    id: str
+    name: str
+    service_center: str
+    sheet_name: str = ""
+    load_count: int = 0
+    driver_count: int = 0
+    saved_at: str = ""
+
+
+@dataclass(frozen=True)
+class SavedPlan:
+    """A saved plan with everything needed to rebuild it."""
+
+    id: str
+    name: str
+    service_center: str
+    sheet_name: str = ""
+    load_count: int = 0
+    driver_count: int = 0
+    saved_at: str = ""
+    settings: str = "{}"
+    loads: str = "[]"
+    groups: str = "[]"
+
+    @property
+    def summary(self) -> PlanSummary:
+        return PlanSummary(
+            id=self.id,
+            name=self.name,
+            service_center=self.service_center,
+            sheet_name=self.sheet_name,
+            load_count=self.load_count,
+            driver_count=self.driver_count,
+            saved_at=self.saved_at,
+        )
 
 
 @dataclass(frozen=True)
@@ -339,6 +417,89 @@ class Store:
         self.connection.commit()
         return cursor.rowcount > 0
 
+    # -- saved plans -------------------------------------------------------
+
+    def save_plan(self, saved: SavedPlan) -> tuple[str, bool]:
+        """Store a plan under its name, returning ``(id, is_new)``.
+
+        A name belongs to one service center: saving over a name replaces that
+        plan rather than quietly leaving two plans a dispatcher cannot tell
+        apart. Its ID, and so its link, survives the replacement.
+        """
+        existing = self.plan_named(saved.service_center, saved.name)
+        if existing is not None:
+            self._execute(
+                "UPDATE saved_plan SET sheet_name = ?, load_count = ?, driver_count = ?, "
+                "settings = ?, loads = ?, groups = ? WHERE id = ?",
+                (
+                    saved.sheet_name,
+                    int(saved.load_count),
+                    int(saved.driver_count),
+                    saved.settings,
+                    saved.loads,
+                    saved.groups,
+                    existing.id,
+                ),
+            )
+            self.connection.commit()
+            return existing.id, False
+
+        plan_id = saved.id or uuid.uuid4().hex
+        self._execute(
+            "INSERT INTO saved_plan (id, name, service_center, sheet_name, load_count, "
+            "driver_count, settings, loads, groups) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                plan_id,
+                saved.name,
+                saved.service_center,
+                saved.sheet_name,
+                int(saved.load_count),
+                int(saved.driver_count),
+                saved.settings,
+                saved.loads,
+                saved.groups,
+            ),
+        )
+        self.connection.commit()
+        return plan_id, True
+
+    def saved_plans(self, service_center: Optional[str] = None) -> list[PlanSummary]:
+        """Every saved plan, newest first, without the payload."""
+        sql = (
+            "SELECT id, name, service_center, sheet_name, load_count, driver_count, saved_at "
+            "FROM saved_plan"
+        )
+        if service_center is None:
+            cursor = self._execute(sql + " ORDER BY saved_at DESC, name")
+        else:
+            cursor = self._execute(
+                sql + " WHERE service_center = ? ORDER BY saved_at DESC, name", (service_center,)
+            )
+        return [PlanSummary(*_plan_row(row)) for row in cursor.fetchall()]
+
+    def saved_plan(self, plan_id: str) -> Optional[SavedPlan]:
+        cursor = self._execute(
+            "SELECT id, name, service_center, sheet_name, load_count, driver_count, saved_at, "
+            "settings, loads, groups FROM saved_plan WHERE id = ?",
+            (plan_id,),
+        )
+        row = cursor.fetchone()
+        return SavedPlan(*_plan_row(row), *row[7:]) if row else None
+
+    def plan_named(self, service_center: str, name: str) -> Optional[PlanSummary]:
+        cursor = self._execute(
+            "SELECT id, name, service_center, sheet_name, load_count, driver_count, saved_at "
+            "FROM saved_plan WHERE service_center = ? AND name = ?",
+            (service_center, name),
+        )
+        row = cursor.fetchone()
+        return PlanSummary(*_plan_row(row)) if row else None
+
+    def delete_plan(self, plan_id: str) -> bool:
+        cursor = self._execute("DELETE FROM saved_plan WHERE id = ?", (plan_id,))
+        self.connection.commit()
+        return cursor.rowcount > 0
+
     # -- lanes -------------------------------------------------------------
 
     def lane(self, from_zip: str, to_zip: str) -> Optional[Lane]:
@@ -439,6 +600,11 @@ def _as_location(row) -> Location:
         lon=float(row[6]) if row[6] is not None else None,
         dwell_hours=float(row[7]),
     )
+
+
+def _plan_row(row) -> tuple:
+    """The columns a saved plan shares between its summary and its full form."""
+    return (row[0], row[1], row[2], row[3] or "", int(row[4]), int(row[5]), str(row[6]))
 
 
 def _split_stores(stores: str) -> list[str]:

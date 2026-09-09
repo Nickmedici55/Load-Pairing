@@ -4,6 +4,8 @@ import os
 import re
 import tempfile
 import unittest
+from html import unescape
+from urllib.parse import urlencode
 from wsgiref.util import setup_testing_defaults
 
 from loadpairing import web
@@ -129,6 +131,46 @@ class WebAppTest(unittest.TestCase):
         body, content_type = multipart({}, {"centroids": ("c.csv", CENTROIDS.encode())})
         return self.request("/coordinates", "POST", body, content_type)
 
+    def form_fields(self, html):
+        """Everything the plan page's form would submit, as a browser would."""
+        return {
+            name: unescape(value)
+            for name, value in re.findall(
+                r'<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"', html
+            )
+        }
+
+    def post_arrange(self, fields, action="arrange", **moves):
+        """Re-submit the plan page with some loads moved to other drivers."""
+        fields = dict(fields, action=action)
+        for load_id, driver in moves.items():
+            fields[f"driver:{load_id}"] = str(driver)
+        return self.request(
+            "/arrange", "POST", urlencode(fields).encode(),
+            "application/x-www-form-urlencoded",
+        )
+
+    def planned(self):
+        """A plan page ready to rearrange, and its form fields."""
+        self.prime_coordinates()
+        _status, html = self.post_plan()
+        return html, self.form_fields(html)
+
+    def drivers_in(self, html):
+        """Which loads sit on which driver number, as the page renders it."""
+        grouped = {}
+        for load_id, driver in re.findall(
+            r'name="driver:([^"]+)" value="(\d+)"', html
+        ):
+            grouped.setdefault(driver, []).append(load_id)
+        return {driver: sorted(loads) for driver, loads in grouped.items()}
+
+    def driver_of(self, html, load_id):
+        for driver, loads in self.drivers_in(html).items():
+            if load_id in loads:
+                return driver
+        raise AssertionError(f"{load_id} is not on the page")
+
     def post_plan(self, **overrides):
         fields = {"tab": "3", "carrier": "PTAG", "dc_zip": "01020", "earliest_start": "4",
                   "max_duty": "14", "max_drive": "11",
@@ -149,12 +191,13 @@ class WebAppTest(unittest.TestCase):
         _status, html = self.request("/")
         self.assertIn('name="carrier" value="PTAG"', html)
 
-    def test_a_load_over_one_shift_is_shown_as_a_layover_not_a_failure(self):
+    def test_a_load_that_misses_its_window_is_shown_with_the_reason(self):
         self.prime_coordinates()
         status, html = self.post_plan()
         self.assertEqual(status, "200 OK")
         self.assertIn("10375781", html)          # the Adirondack run
-        self.assertIn("layover", html)
+        self.assertIn("cannot be scheduled", html)
+        self.assertIn("cannot reach Plattsburgh", html)
         self.assertNotIn("exceeds the 11 h limit", html)
 
     def test_a_midnight_delivery_time_shows_as_a_drop_and_hook(self):
@@ -199,8 +242,9 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("Holyoke", html)
         self.assertIn("estimated mileage", html)
         # The Adirondack run cannot make its 05:15-09:00 window on these miles.
-        self.assertIn("Unschedulable", html)
+        # It stays on the page as a driver of its own so it can be moved.
         self.assertIn("10375781", html)
+        self.assertIn("cannot be scheduled", html)
 
     def test_the_plan_names_the_service_center_it_ran_out_of(self):
         self.prime_coordinates()
@@ -267,6 +311,118 @@ class WebAppTest(unittest.TestCase):
 
         _status, chicopee = self.request("/locations?sc=01020")
         self.assertNotIn('value="3.50"', chicopee)
+
+    def test_a_plan_comes_back_ready_to_rearrange(self):
+        html, fields = self.planned()
+        self.assertIn('action="/arrange"', html)
+        self.assertIn('name="driver:10375774"', html)
+        # Everything needed to re-cost the day without the spreadsheet.
+        self.assertIn("loads", fields)
+        self.assertIn("settings", fields)
+        self.assertIn("baseline", fields)
+        self.assertIn("10375774", fields["loads"])
+
+    def test_moving_two_loads_onto_one_driver_re_costs_the_day(self):
+        html, fields = self.planned()
+        before = self.drivers_in(html)
+        self.assertNotEqual(before["1"], sorted(["10375790", "10375774", "10375775"]))
+
+        # Put the Westfield drop and hook on the same driver as the Holyoke pair.
+        status, moved = self.post_arrange(
+            fields, **{"10375790": 2, "10375774": 2, "10375775": 2}
+        )
+
+        self.assertEqual(status, "200 OK")
+        after = self.drivers_in(moved)
+        together = [loads for loads in after.values() if len(loads) == 3]
+        self.assertEqual(together, [sorted(["10375774", "10375775", "10375790"])])
+        self.assertIn("vs the built plan", moved)      # the comparison is shown
+
+    def test_a_rearranged_page_can_be_rearranged_again(self):
+        _html, fields = self.planned()
+        _status, once = self.post_arrange(fields, **{"10375774": 2, "10375775": 2})
+        self.assertEqual(self.driver_of(once, "10375774"), self.driver_of(once, "10375775"))
+
+        # The page that came back carries what the next change needs.
+        status, twice = self.post_arrange(self.form_fields(once), **{"10375775": 9})
+
+        self.assertEqual(status, "200 OK")
+        self.assertNotEqual(self.driver_of(twice, "10375774"), self.driver_of(twice, "10375775"))
+
+    def test_splitting_a_pair_costs_a_driver(self):
+        html, fields = self.planned()
+        paired = [loads for loads in self.drivers_in(html).values() if len(loads) == 2]
+        self.assertTrue(paired, "the fixture should pair two loads")
+        first, second = paired[0]
+
+        _status, split = self.post_arrange(fields, **{first: 8, second: 9})
+
+        self.assertIn("vs the built plan", split)
+        self.assertTrue(all(len(loads) == 1 for loads in self.drivers_in(split).values()))
+
+    def test_a_submission_that_is_not_a_plan_is_refused_cleanly(self):
+        _html, fields = self.planned()
+        status, html = self.post_arrange(dict(fields, loads="not a plan"))
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("Upload the sheet again", html)
+
+    def test_saving_needs_a_name(self):
+        _html, fields = self.planned()
+        status, html = self.post_arrange(fields, action="save")
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("Give the plan a name", html)
+
+    def test_a_plan_is_saved_under_a_name_and_can_be_reopened(self):
+        _html, fields = self.planned()
+        fields["plan_name"] = "Tuesday 8/28"
+
+        status, saved = self.post_arrange(fields, action="save", **{"10375774": 5})
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Saved as", saved)
+
+        _status, listed = self.request("/plans")
+        self.assertIn("Tuesday 8/28", listed)
+
+        link = re.search(r'/plans/open\?id=([0-9a-f]+)', listed)
+        self.assertIsNotNone(listed)
+        status, reopened = self.request(f"/plans/open?id={link.group(1)}")
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Tuesday 8/28", reopened)
+        self.assertIn("10375774", reopened)
+        # The load moved before saving is still on a driver of its own.
+        alone = [loads for loads in self.drivers_in(reopened).values() if loads == ["10375774"]]
+        self.assertEqual(len(alone), 1)
+
+    def test_saving_over_a_name_replaces_that_plan(self):
+        _html, fields = self.planned()
+        fields["plan_name"] = "Tuesday"
+        self.post_arrange(fields, action="save")
+        _status, again = self.post_arrange(fields, action="save", **{"10375774": 7})
+
+        self.assertIn("replacing the plan of that name", again)
+        _status, listed = self.request("/plans")
+        self.assertEqual(listed.count("/plans/open?id="), 1)
+
+    def test_a_saved_plan_can_be_deleted(self):
+        _html, fields = self.planned()
+        fields["plan_name"] = "Scrap this"
+        self.post_arrange(fields, action="save")
+        _status, listed = self.request("/plans")
+        plan_id = re.search(r'/plans/open\?id=([0-9a-f]+)', listed).group(1)
+
+        status, after = self.request(
+            "/plans/delete", "POST", urlencode({"id": plan_id}).encode(),
+            "application/x-www-form-urlencoded",
+        )
+
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Plan deleted", after)
+        self.assertNotIn("Scrap this", after)
+
+    def test_opening_a_plan_that_is_gone_says_so(self):
+        status, html = self.request("/plans/open?id=deadbeef")
+        self.assertEqual(status, "404 Not Found")
+        self.assertIn("no longer saved", html)
 
     def test_uploading_a_sheet_records_its_locations(self):
         self.post_plan()

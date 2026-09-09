@@ -94,6 +94,21 @@ CREATE TABLE location (
     PRIMARY KEY (service_center, zip)
 );
 
+CREATE TABLE saved_plan (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    service_center TEXT NOT NULL,
+    sheet_name     TEXT,
+    load_count     INTEGER NOT NULL DEFAULT 0,
+    driver_count   INTEGER NOT NULL DEFAULT 0,
+    settings       TEXT NOT NULL,   -- JSON: the settings it was planned under
+    loads          TEXT NOT NULL,   -- JSON: the parsed loads, so it reopens
+    groups         TEXT NOT NULL,   -- JSON: [[load_id, ...], ...] per driver
+    saved_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One name per service center: saving over a name replaces that plan.
+CREATE UNIQUE INDEX saved_plan_name_idx ON saved_plan (service_center, name);
+
 CREATE TABLE lane (
     from_zip    TEXT NOT NULL,
     to_zip      TEXT NOT NULL,
@@ -113,6 +128,33 @@ Mileage should come from a truck-legal routing source. These loads run Class 8
 into Lake Placid, Massena, and Plattsburgh NY, where car routing and truck
 routing diverge meaningfully. PC*Miler is the preferred source if a license is
 available.
+
+## Rearranging a plan
+
+The matcher answers "the fewest drivers this sheet can run on". A dispatcher
+knows things it does not -- who is already out, which receiver will wait -- so
+the plan page lets them move loads between drivers and re-cost the day.
+
+- Each load carries the number of the driver running it. Loads sharing a number
+  share a driver; a number nobody else has splits them apart.
+- Nothing is rejected. A grouping that breaks the duty limit or misses a
+  delivery time still comes back costed with the breakage named: the point is
+  to show the consequence, not to refuse.
+- The running order **within** a driver is still chosen, not dictated. Every
+  order is tried (up to four loads, 24 permutations) and the cheapest feasible
+  one is kept, because the same pair can work one way round and not the other.
+- Every arrangement is costed against the plan as the matcher built it, so the
+  page can say what the change bought or cost.
+
+A plan can be saved under a name. The save keeps the loads and the settings,
+not the miles or the dwell: reopening re-costs the day against what the dwell
+says then, so a dwell corrected later shows up in every plan touching that
+store. The loads have to be stored because the uploaded spreadsheet does not
+survive the request.
+
+The same JSON round-trips through a hidden form field between rearrangements,
+so it comes back from a browser. `loadpairing.snapshot` validates every field
+rather than trusting it.
 
 ## Spreadsheet parsing
 
