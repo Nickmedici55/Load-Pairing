@@ -147,9 +147,12 @@ the plan page lets them move loads between drivers and re-cost the day.
 - Nothing is rejected. A grouping that breaks the duty limit or misses a
   delivery time still comes back costed with the breakage named: the point is
   to show the consequence, not to refuse.
-- The running order **within** a driver is still chosen, not dictated. Every
-  order is tried (up to four loads, 24 permutations) and the cheapest feasible
-  one is kept, because the same pair can work one way round and not the other.
+- The running order **within** a driver is the dispatcher's too. It is run as
+  listed rather than quietly improved, because a plan that reorders itself
+  cannot be checked against what was asked for. Every order is costed alongside
+  (up to four loads, 24 permutations) and shown with its duty and drive hours,
+  so a pair that only works one way round says which way instead of just
+  failing. *Run this way* pins one.
 - Every arrangement is costed against the plan as the matcher built it, so the
   page can say what the change bought or cost.
 
